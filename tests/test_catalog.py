@@ -124,3 +124,22 @@ def test_user_rejects_linked_standalone_source(tmp_path) -> None:
     # When discovery runs, then explicit source selection cannot bypass link protection.
     with pytest.raises(ValueError, match="symlink"):
         discover(linked)
+
+
+def test_user_catalog_keeps_valid_sources_when_one_install_is_missing(tmp_path) -> None:
+    # Given an obsolete plugin entry alongside a valid standalone skill.
+    root = tmp_path / "claude"
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "plugins": {"lost@market": [{"installPath": str(tmp_path / "missing")}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "skills/check").mkdir(parents=True)
+    (root / "skills/check/SKILL.md").write_text("Check.", encoding="utf-8")
+    result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
+    assert any(item["name"] == "check" for item in result["items"])
+    assert any(item["name"] == "lost" and item["status"] == "unresolved" for item in result["items"])

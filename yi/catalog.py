@@ -60,10 +60,22 @@ def installed(root: Path) -> list[dict[str, str]]:
     data = json.loads(index.read_text(encoding="utf-8")) if index.exists() else {"plugins": {}}
     items = standalone_items(root)
     seen = set()
-    for entries in data["plugins"].values():
+    for index_name, entries in data["plugins"].items():
         for entry in entries:
             source = Path(entry["installPath"])
             if source not in seen:
+                if not source.is_dir() or not (source / ".claude-plugin/plugin.json").is_file():
+                    items.append(
+                        {
+                            "name": index_name.split("@", 1)[0],
+                            "kind": "plugin",
+                            "source": str(source),
+                            "path": str(source),
+                            "status": "unresolved",
+                            "reason": "Installed source or manifest is missing; select a valid source explicitly.",
+                        }
+                    )
+                    continue
                 manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
                 items.append({"name": manifest["name"], "kind": "plugin", "source": str(source), "path": str(source)})
                 items.extend({**item, "source": str(source)} for item in discover(source))
