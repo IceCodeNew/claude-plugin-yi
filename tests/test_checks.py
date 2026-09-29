@@ -270,3 +270,22 @@ def test_user_cannot_accept_shared_configuration_execution_mode(tmp_path) -> Non
     with pytest.raises(ValueError, match="Shared configuration"):
         accept_changes(root)
     assert manifest.read_text(encoding="utf-8") == original
+
+
+def test_user_native_process_output_does_not_block_after_startup(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    from yi.native_opencode import drain_output, server_password
+
+    # Given a real process that emits a startup line and more than one pipe buffer of logs.
+    with subprocess.Popen(
+        [sys.executable, "-c", "import os; os.write(1,b'server password fixture\\n'); os.write(1,b'x'*1048576)"],
+        stdout=subprocess.PIPE,
+    ) as process:
+        assert server_password(process) == "fixture"
+        # When discovery runs after startup, background output must not stall the process.
+        reader = drain_output(process)
+        assert process.wait(timeout=5) == 0
+        reader.join(timeout=5)
+        assert not reader.is_alive()

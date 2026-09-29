@@ -7,6 +7,7 @@ import selectors
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -27,8 +28,10 @@ def resources(executable: str, work: Path, environment: dict[str, str], expected
         stderr=subprocess.STDOUT,
         start_new_session=True,
     ) as process:
+        reader = None
         try:
             password = server_password(process)
+            reader = drain_output(process)
             token = base64.b64encode(f"opencode:{password}".encode()).decode()
             query = urllib.parse.urlencode({"location[directory]": str(work)})
             url = f"http://127.0.0.1:{port}/api"
@@ -56,6 +59,8 @@ def resources(executable: str, work: Path, environment: dict[str, str], expected
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+            if reader is not None:
+                reader.join(timeout=5)
 
 
 def server_password(process: subprocess.Popen) -> str:
@@ -80,3 +85,16 @@ def server_password(process: subprocess.Popen) -> str:
                     return line.removeprefix(b"server password ").decode().strip()
     msg = "OpenCode did not complete authenticated startup."
     raise ValueError(msg)
+
+
+def drain_output(process: subprocess.Popen) -> threading.Thread:
+    """Discard server logs after startup so its output pipe remains writable."""
+
+    def consume() -> None:
+        if process.stdout is not None:
+            while process.stdout.read(65536):
+                pass
+
+    reader = threading.Thread(target=consume, daemon=True)
+    reader.start()
+    return reader
