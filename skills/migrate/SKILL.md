@@ -3,7 +3,11 @@ name: migrate
 description: This skill prepares isolated migration artifacts when the user asks to "migrate Claude plugins", "迁移常用技能", or "move commands to another harness".
 argument-hint: "[source paths] [--output directory]"
 disable-model-invocation: true
-allowed-tools: Bash, Read, AskUserQuestion
+allowed-tools:
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/yi.py" *)
+  - Bash(uv run --no-project --with 'pyyaml>=6,<7' python "${CLAUDE_PLUGIN_ROOT}/scripts/yi.py" *)
+  - Read
+  - AskUserQuestion
 ---
 
 # Migrate selected components
