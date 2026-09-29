@@ -462,7 +462,7 @@ def test_user_blocks_nested_plugin_root_hook_dependencies(tmp_path) -> None:
     assert any(item["kind"] == "hooks" and item["status"] == "blocked" for item in report["components"])
 
 
-@pytest.mark.parametrize("target", ["opencode-v2", "pi", "codex"])
+@pytest.mark.parametrize("target", ["opencode-v2", "pi"])
 def test_user_migrates_prompt_arguments_to_native_templates(tmp_path, target) -> None:
     from yi.adapters import preview
 
@@ -503,3 +503,30 @@ def test_user_migrates_plain_prompt_to_amp_palette_command(tmp_path) -> None:
     report, files = preview(source, "ampcode")
     assert "ampcode/home/.config/amp/plugins/sample-review.js" in files
     assert not any(item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_codex_command_becomes_explicit_only_skill(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/ping.md").write_text("---\ndescription: Ping\n---\nReply PONG.\n", encoding="utf-8")
+    _report, files = preview(source, "codex")
+    assert b"Reply PONG." in files["codex/home/.agents/skills/sample-ping/SKILL.md"]
+    assert b"allow_implicit_invocation: false" in files["codex/home/.agents/skills/sample-ping/agents/openai.yaml"]
+    assert not any(".codex/prompts" in name for name in files)
+
+
+def test_user_codex_template_substitution_is_not_silently_changed(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/echo.md").write_text("Reply $ARGUMENTS.\n", encoding="utf-8")
+    report, files = preview(source, "codex")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"

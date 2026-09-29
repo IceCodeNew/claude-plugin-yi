@@ -40,9 +40,8 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
                     {**item, "status": "blocked", "reason": "Command semantics require target-harness review."}
                 )
             else:
-                name, content = converted
-                files[name] = content
-                owners[name] = item["name"]
+                files.update(converted)
+                owners.update(dict.fromkeys(converted, item["name"]))
                 components.append(
                     {**item, "status": "unverified", "reason": "Native prompt prepared; verify target behavior."}
                 )
@@ -83,16 +82,14 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
     }, files
 
 
-def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | None:
+def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes] | None:
     """Translate plain Markdown commands without execution semantics."""
     roots = {
         "opencode-v2": ".config/opencode/commands",
         "pi": ".pi/agent/prompts",
-        "codex": ".codex/prompts",
+        "codex": ".agents/skills",
         "ampcode": ".config/amp/plugins",
     }
-    if target not in roots:
-        return None
     content = path.read_bytes()
     reject_sensitive(path, content)
     text = content.decode("utf-8")
@@ -107,13 +104,16 @@ def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | No
         return None
     without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
     if any(token in without_arguments for token in ("$", "!`", "@", "CLAUDE_PLUGIN_ROOT")) or (
-        target == "ampcode" and re.search(r"\$[1-9]", body)
+        (target == "ampcode" and re.search(r"\$[1-9]", body)) or (target == "codex" and "$" in body)
     ):
         return None
     if target == "ampcode":
-        return amp_command(plugin, path.stem, metadata, body)
+        name, content = amp_command(plugin, path.stem, metadata, body)
+        return {name: content}
+    if target == "codex":
+        return codex_command(plugin, path.stem, metadata, body)
     destination = Path(target) / "home" / roots[target] / f"{plugin}-{path.stem}.md"
-    return str(destination), text.encode()
+    return {str(destination): text.encode()}
 
 
 def skill_files(source: Path, destination: Path) -> tuple[dict[str, bytes], list[str]]:
@@ -209,3 +209,15 @@ def amp_command(plugin: str, name: str, metadata: dict, body: str) -> tuple[str,
         lines.append(f"    const content = {json.dumps(body)};")
     lines.extend(["    await ctx.thread.appendUserMessage({type: 'user-message', content});", "  });", "}"])
     return f"ampcode/home/.config/amp/plugins/{plugin}-{name}.js", ("\n".join(lines) + "\n").encode()
+
+
+def codex_command(plugin: str, name: str, metadata: dict, body: str) -> dict[str, bytes]:
+    """Replace removed custom prompts with explicitly invoked native skills."""
+    identifier = f"{plugin}-{name}"
+    destination = f"codex/home/.agents/skills/{identifier}"
+    parser = importlib.import_module("yaml")
+    header = {"name": identifier, "description": metadata.get("description", f"Run {name} explicitly.")}
+    return {
+        f"{destination}/SKILL.md": ("---\n" + parser.safe_dump(header) + "---\n" + body).encode(),
+        f"{destination}/agents/openai.yaml": b"policy:\n  allow_implicit_invocation: false\n",
+    }
