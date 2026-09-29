@@ -80,7 +80,7 @@ def test_user_receives_nonblocking_diagnostic_for_malformed_event(tmp_path) -> N
     # Given a JSON value that is not a hook object.
     # When the collector runs as a hook, then Claude continues without a traceback.
     result = subprocess.run(  # noqa: S603 - Fixed local CLI and synthetic malformed input.
-        [sys.executable, str(ENTRY), "record", "--hook"],
+        [sys.executable, str(ENTRY), "--data-dir", str(tmp_path / "data"), "record", "--hook"],
         input="[]",
         capture_output=True,
         text=True,
