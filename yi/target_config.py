@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from yi.frontmatter import read_yaml
 from yi.safety import reject_sensitive
 
 
@@ -113,7 +114,7 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
             reject_sensitive(path, content)
             text = content.decode("utf-8")
             header, separator, body = text.removeprefix("---\n").partition("\n---\n")
-            metadata = parser.safe_load(header) if separator else {}
+            metadata = read_yaml(header) if separator else {}
             name = f"{manifest['name']}-{path.stem}"
             item = {"name": f"{manifest['name']}:agent:{path.stem}", "kind": "agent", "path": str(path)}
             if (
@@ -132,11 +133,11 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                 )
                 continue
             if target == "codex":
-                definition = {"name": name, "description": metadata["description"], "developer_instructions": body}
+                definition = {"name": name, "description": metadata.get("description"), "developer_instructions": body}
                 content = "\n".join(f"{key} = {json.dumps(value)}" for key, value in definition.items()) + "\n"
                 location = f".codex/agents/{name}.toml"
             else:
-                definition = {"description": metadata["description"], "mode": "subagent"}
+                definition = {"description": metadata.get("description"), "mode": "subagent"}
                 content = "---\n" + parser.safe_dump(definition) + "---\n" + body
                 location = f".config/opencode/agents/{name}.md"
             files[f"{target}/home/{location}"] = content.encode()

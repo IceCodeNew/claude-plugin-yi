@@ -412,3 +412,20 @@ def test_user_rejects_secrets_inside_agent_prompt(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="Sensitive"):
         preview(source, "codex")
+
+
+def test_user_malformed_frontmatter_blocks_only_affected_skill(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, content in (
+        ("bad", "---\nname: [broken\n---\nBad."),
+        ("good", "---\nname: good\ndescription: Good\n---\nGood."),
+    ):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(content, encoding="utf-8")
+    report, files = preview(source, "pi")
+    assert any(item["name"] == "sample:bad" and item["status"] == "blocked" for item in report["components"])
+    assert any("sample-good" in name for name in files)

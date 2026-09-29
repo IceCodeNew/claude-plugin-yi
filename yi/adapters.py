@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from yi.catalog import checked_source, discover, source_manifest
+from yi.frontmatter import read_yaml
 from yi.safety import reject_sensitive
 from yi.target_config import agent_files, hook_files, mcp_files
 
@@ -100,7 +101,7 @@ def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | No
         header, separator, _body = text[4:].partition("\n---\n")
         if not separator:
             return None
-        metadata = read_yaml(header) or {}
+        metadata = read_yaml(header)
     if not isinstance(metadata, dict) or set(metadata) - {"description"}:
         return None
     if any(token in text for token in ("$", "!`", "${CLAUDE_PLUGIN_ROOT}", "@")):
@@ -179,13 +180,3 @@ def plugin_blockers(manifest: dict) -> list[dict]:
         for key in sorted(set(manifest) - known)
     )
     return components
-
-
-def read_yaml(text: str) -> object:
-    """Load the migration-only parser without affecting hook startup."""
-    try:
-        parser = importlib.import_module("yaml")
-    except ModuleNotFoundError as error:
-        msg = "Migration requires PyYAML. Run the helper with uv run --with pyyaml."
-        raise ValueError(msg) from error
-    return parser.safe_load(text)
