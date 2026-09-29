@@ -1,6 +1,7 @@
 """Plan target files and report unsupported plugin behavior."""
 
 import importlib
+import json
 import re
 from pathlib import Path
 
@@ -8,13 +9,7 @@ from yi.catalog import checked_source, discover, source_manifest
 from yi.frontmatter import read_yaml
 from yi.safety import reject_sensitive
 from yi.target_config import agent_files, hook_files, mcp_files
-
-SKILL_ROOTS = {
-    "ampcode": ".config/amp/skills",
-    "codex": ".agents/skills",
-    "opencode-v2": ".config/opencode/skills",
-    "pi": ".pi/agent/skills",
-}
+from yi.targets import SKILL_ROOTS
 
 
 def preview(source: Path, target: str, selected: list[str] | None = None) -> tuple[dict, dict[str, bytes]]:
@@ -90,23 +85,33 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
 
 def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | None:
     """Translate plain Markdown commands without execution semantics."""
-    roots = {"opencode-v2": ".config/opencode/commands", "pi": ".pi/agent/prompts", "codex": ".codex/prompts"}
+    roots = {
+        "opencode-v2": ".config/opencode/commands",
+        "pi": ".pi/agent/prompts",
+        "codex": ".codex/prompts",
+        "ampcode": ".config/amp/plugins",
+    }
     if target not in roots:
         return None
     content = path.read_bytes()
     reject_sensitive(path, content)
     text = content.decode("utf-8")
     metadata = {}
+    body = text
     if text.startswith("---\n"):
-        header, separator, _body = text[4:].partition("\n---\n")
+        header, separator, body = text[4:].partition("\n---\n")
         if not separator:
             return None
         metadata = read_yaml(header)
     if not isinstance(metadata, dict) or set(metadata) - {"description", "argument-hint"}:
         return None
     without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
-    if any(token in without_arguments for token in ("$", "!`", "@", "CLAUDE_PLUGIN_ROOT")):
+    if any(token in without_arguments for token in ("$", "!`", "@", "CLAUDE_PLUGIN_ROOT")) or (
+        target == "ampcode" and re.search(r"\$[1-9]", body)
+    ):
         return None
+    if target == "ampcode":
+        return amp_command(plugin, path.stem, metadata, body)
     destination = Path(target) / "home" / roots[target] / f"{plugin}-{path.stem}.md"
     return str(destination), text.encode()
 
@@ -181,3 +186,26 @@ def plugin_blockers(manifest: dict) -> list[dict]:
         for key in sorted(set(manifest) - known)
     )
     return components
+
+
+def amp_command(plugin: str, name: str, metadata: dict, body: str) -> tuple[str, bytes]:
+    """Wrap a prompt in Amp's palette API, using a dialog for raw arguments."""
+    options = {"title": f"{plugin}: {name}", "category": plugin, "description": metadata.get("description", name)}
+    lines = [
+        "export default function (amp) {",
+        f"  amp.registerCommand({json.dumps(plugin + '.' + name)}, {json.dumps(options)}, async (ctx) => {{",
+        "    if (!ctx.thread) { await ctx.ui.notify('Start a thread before using this command.'); return; }",
+    ]
+    if "$ARGUMENTS" in body:
+        dialog = {"title": "Arguments", "helpText": metadata.get("argument-hint", ""), "requireHuman": True}
+        lines.extend(
+            [
+                f"    const args = await ctx.ui.input({json.dumps(dialog)});",
+                "    if (args === undefined) return;",
+                f"    const content = {json.dumps(body)}.replaceAll('$ARGUMENTS', () => args);",
+            ]
+        )
+    else:
+        lines.append(f"    const content = {json.dumps(body)};")
+    lines.extend(["    await ctx.thread.appendUserMessage({type: 'user-message', content});", "  });", "}"])
+    return f"ampcode/home/.config/amp/plugins/{plugin}-{name}.js", ("\n".join(lines) + "\n").encode()

@@ -477,3 +477,29 @@ def test_user_migrates_prompt_arguments_to_native_templates(tmp_path, target) ->
     report, files = preview(source, target)
     assert any(b"$ARGUMENTS" in content for content in files.values())
     assert not any(item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_cannot_select_ambiguous_standalone_names(tmp_path) -> None:
+    from yi.cli import selections_by_source
+
+    sources = []
+    for scope in ("user", "project"):
+        source = tmp_path / scope / "check"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("Check.", encoding="utf-8")
+        sources.append(source)
+    with pytest.raises(ValueError, match="Ambiguous"):
+        selections_by_source(sources, ["check"])
+
+
+def test_user_migrates_plain_prompt_to_amp_palette_command(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/review.md").write_text("---\ndescription: Review\n---\nReview $ARGUMENTS.\n", encoding="utf-8")
+    report, files = preview(source, "ampcode")
+    assert "ampcode/home/.config/amp/plugins/sample-review.js" in files
+    assert not any(item["status"] == "blocked" for item in report["components"])
