@@ -163,3 +163,20 @@ def test_user_catalog_ranks_counts_deterministically(tmp_path) -> None:
     )
     result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
     assert [(item["name"], item["count"]) for item in result["items"]] == [("beta", 1), ("alpha", 0)]
+
+
+def test_user_discovers_explicit_skill_directory_under_aliased_parent(tmp_path) -> None:
+    # Given an explicit skill directory and a platform-style ancestor alias.
+    actual = tmp_path / "actual"
+    source = actual / "plugin"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        '{"name":"sample","skills":["./custom/check"]}', encoding="utf-8"
+    )
+    (source / "custom/check").mkdir(parents=True)
+    (source / "custom/check/SKILL.md").write_text("Check.", encoding="utf-8")
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    # When discovered, the directory's own SKILL.md is not omitted.
+    result = run_cli(tmp_path, "catalog", "--source", str(alias / "plugin"), "--json")
+    assert [item["name"] for item in result["items"]] == ["sample:check"]

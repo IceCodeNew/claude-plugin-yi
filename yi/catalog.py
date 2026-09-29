@@ -25,7 +25,10 @@ def discover(source: Path) -> list[dict[str, str]]:
     items = []
     for kind, folder, pattern in (("skill", "skills", "*/SKILL.md"), ("command", "commands", "**/*.md")):
         for base in component_roots(source, folder, manifest.get(folder, [])):
-            paths = [base] if base.is_file() else sorted(base.glob(pattern))
+            if kind == "skill" and (base / "SKILL.md").is_file():
+                paths = [base / "SKILL.md"]
+            else:
+                paths = [base] if base.is_file() else sorted(base.glob(pattern))
             for path in paths:
                 if any(parent.is_symlink() for parent in (path, *path.parents) if parent != source):
                     msg = f"Source symlink requires review: {path}"
@@ -108,7 +111,7 @@ def standalone_items(root: Path) -> list[dict[str, str]]:
 def checked_source(source: Path) -> Path:
     """Resolve explicit source paths only after rejecting symlink components."""
     source = source.expanduser().absolute()
-    if any(path.is_symlink() for path in (source, *source.parents)):
+    if source.is_symlink():
         msg = f"Source symlink requires review: {source}"
         raise ValueError(msg)
     return source.resolve()
