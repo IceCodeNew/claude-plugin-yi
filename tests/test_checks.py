@@ -243,3 +243,30 @@ def test_user_native_password_rejects_incomplete_startup_line(tmp_path) -> None:
         with pytest.raises(ValueError, match="startup"):
             server_password(process)
         process.wait(timeout=5)
+
+
+def test_user_cannot_accept_shared_configuration_execution_mode(tmp_path) -> None:
+    import pytest
+
+    from yi.checks import accept_changes
+
+    # Given a rendered shared configuration with an unreviewed executable bit.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    path = root / "codex/home/.codex/config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"# config\n")
+    path.chmod(0o755)
+    manifest = root / "manifests/codex--shared.json"
+    original = json.dumps(
+        {
+            "hashes": {"codex/home/.codex/config.toml": hashlib.sha256(path.read_bytes()).hexdigest()},
+            "executables": [],
+            "components": [],
+        }
+    )
+    manifest.write_text(original, encoding="utf-8")
+    # When acceptance is requested, shared generated metadata stays protected.
+    with pytest.raises(ValueError, match="Shared configuration"):
+        accept_changes(root)
+    assert manifest.read_text(encoding="utf-8") == original

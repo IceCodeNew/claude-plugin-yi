@@ -54,12 +54,11 @@ def accept_changes(root: Path) -> None:
             content = path.read_bytes()
             reject_sensitive(path, content)
             digest = hashlib.sha256(content).hexdigest()
-            if relative in SHARED and digest != data["hashes"][relative]:
+            mode_changed = bool(path.stat().st_mode & 0o111) != (relative in data.get("executables", []))
+            if relative in SHARED and (digest != data["hashes"][relative] or mode_changed):
                 msg = f"Shared configuration requires source-fragment regeneration: {relative}"
                 raise ValueError(msg)
-            if digest != data["hashes"][relative] or bool(path.stat().st_mode & 0o111) != (
-                relative in data.get("executables", [])
-            ):
+            if digest != data["hashes"][relative] or mode_changed:
                 reviewed.add(relative)
             hashes[relative] = digest
             if path.stat().st_mode & 0o111:
