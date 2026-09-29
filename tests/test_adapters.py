@@ -622,3 +622,22 @@ def test_user_shared_mcp_names_cannot_collide(path) -> None:
     # When composed, neither duplicate tables nor silent last-writer wins are allowed.
     with pytest.raises(ValueError, match="collision"):
         combine(path, pieces)
+
+
+def test_user_agent_declared_twice_is_converted_once(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given one agent included by both defaults and an explicit manifest path.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        '{"name":"sample","agents":["./agents/reviewer.md"]}', encoding="utf-8"
+    )
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Review\n---\nReview.\n", encoding="utf-8"
+    )
+    # When converted, duplicate discovery does not become a collision.
+    report, files = preview(source, "codex")
+    assert len(files) == 1
+    assert len([item for item in report["components"] if item["kind"] == "agent"]) == 1

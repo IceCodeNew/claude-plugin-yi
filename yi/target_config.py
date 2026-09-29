@@ -104,12 +104,16 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
     files = {}
     diagnostics = []
     parser = importlib.import_module("yaml")
+    seen = set()
     for base in component_roots(source, "agents", manifest.get("agents", [])):
         paths = [base] if base.is_file() else sorted(base.rglob("*.md"))
         for path in paths:
             if path.is_symlink() or not path.resolve().is_relative_to(source):
                 msg = "Agent path escapes plugin or follows a symlink."
                 raise ValueError(msg)
+            if path.resolve() in seen:
+                continue
+            seen.add(path.resolve())
             content = path.read_bytes()
             reject_sensitive(path, content)
             text = content.decode("utf-8")
