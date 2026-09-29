@@ -25,9 +25,6 @@ def install(root: Path, target: str, destination: Path, *, apply: bool, accept_u
             output = destination / local
             validate_paths(destination, [str(local)])
             validate_paths(root, [relative])
-            if not source.resolve().is_relative_to(root) or not output.resolve().is_relative_to(destination.resolve()):
-                msg = f"Installation path escapes its root: {relative}"
-                raise ValueError(msg)
             content = source.read_bytes()
             if hashlib.sha256(content).hexdigest() != expected:
                 msg = f"Artifact changed since generation: {relative}"

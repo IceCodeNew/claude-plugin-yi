@@ -157,3 +157,32 @@ def test_user_gets_mode_conflict_instead_of_silent_broken_executable(tmp_path) -
     with pytest.raises(ValueError, match="executable"):
         install(root, "pi", home, apply=True, accept_unverified=False)
     assert (home / "run.sh").stat().st_mode & 0o777 == 0o600
+
+
+def test_user_rejects_manifest_path_escape_before_installation(tmp_path) -> None:
+    import pytest
+
+    from yi.install import install
+
+    # Given a manifest that tries to install outside the target HOME.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"private fixture")
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "hashes": {"pi/home/../outside.txt": hashlib.sha256(b"private fixture").hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "pi/outside.txt").write_bytes(b"private fixture")
+    # When installation is requested, then the shared path guard rejects the escape.
+    with pytest.raises(ValueError, match="escapes"):
+        install(root, "pi", destination, apply=True, accept_unverified=True)
+    assert outside.read_bytes() == b"private fixture"
