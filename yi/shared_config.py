@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import tomllib
 from pathlib import Path
 
 SHARED = {
@@ -66,12 +67,22 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
 def combine(name: str, pieces: list[str]) -> bytes:
     """Combine namespaced tables or hook groups without executing their content."""
     if name.endswith(".toml"):
-        return ("\n".join(pieces)).encode()
+        content = "\n".join(pieces)
+        try:
+            tomllib.loads(content)
+        except tomllib.TOMLDecodeError as error:
+            msg = "Shared TOML configuration has a name collision or invalid syntax."
+            raise ValueError(msg) from error
+        return content.encode()
     result = {}
     for text in pieces:
         document = json.loads(text)
         if "mcp" in document:
-            result.setdefault("mcp", {}).setdefault("servers", {}).update(document["mcp"]["servers"])
+            servers = result.setdefault("mcp", {}).setdefault("servers", {})
+            if set(servers) & set(document["mcp"]["servers"]):
+                msg = "Shared MCP server name collision. Rename one source server."
+                raise ValueError(msg)
+            servers.update(document["mcp"]["servers"])
         for event, handlers in document.get("hooks", {}).items():
             result.setdefault("hooks", {}).setdefault(event, []).extend(handlers)
     return (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()

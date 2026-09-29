@@ -90,8 +90,8 @@ def convert_server(server: dict, target: str) -> dict | None:
 
 def toml_server(name: str, value: dict) -> str:
     """Serialize the small supported MCP table without interpolating TOML syntax."""
-    lines = [f"[mcp_servers.{json.dumps(name)}]"]
-    lines.extend(f"{key} = {json.dumps(item)}" for key, item in value.items())
+    lines = [f"[mcp_servers.{json.dumps(name, ensure_ascii=False)}]"]
+    lines.extend(f"{key} = {json.dumps(item, ensure_ascii=False)}" for key, item in value.items())
     return "\n".join(lines) + "\n"
 
 
@@ -134,13 +134,20 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                 continue
             if target == "codex":
                 definition = {"name": name, "description": metadata.get("description"), "developer_instructions": body}
-                content = "\n".join(f"{key} = {json.dumps(value)}" for key, value in definition.items()) + "\n"
+                content = (
+                    "\n".join(f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in definition.items())
+                    + "\n"
+                )
                 location = f".codex/agents/{name}.toml"
             else:
                 definition = {"description": metadata.get("description"), "mode": "subagent"}
                 content = "---\n" + parser.safe_dump(definition) + "---\n" + body
                 location = f".config/opencode/agents/{name}.md"
-            files[f"{target}/home/{location}"] = content.encode()
+            destination = f"{target}/home/{location}"
+            if destination in files:
+                msg = f"Agent destination collision: {destination}. Rename one source agent."
+                raise ValueError(msg)
+            files[destination] = content.encode()
             diagnostics.append(
                 {
                     **item,

@@ -574,3 +574,51 @@ def test_user_gets_specific_mcp_blocker_for_credentials(tmp_path) -> None:
     assert not files
     assert "headers" in report["components"][0]["reason"]
     assert "fixture-secret" not in json.dumps(report)
+
+
+def test_user_codex_agent_preserves_non_bmp_unicode(tmp_path) -> None:
+    import tomllib
+
+    from yi.adapters import preview
+
+    # Given an agent whose instructions contain non-BMP Unicode.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/check.md").write_text("---\nname: check\ndescription: Check\n---\nReply 🚀.\n", encoding="utf-8")
+    # When converted, a real TOML parser accepts the exact instructions.
+    _report, files = preview(source, "codex")
+    document = tomllib.loads(files["codex/home/.codex/agents/sample-check.toml"].decode())
+    assert document["developer_instructions"] == "Reply 🚀.\n"
+
+
+def test_user_rejects_colliding_agent_destinations(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given two agent paths that would produce one destination name.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for folder in ("one", "two"):
+        (source / "agents" / folder).mkdir(parents=True)
+        (source / "agents" / folder / "review.md").write_text(
+            f"---\nname: {folder}\ndescription: Review\n---\n{folder}\n", encoding="utf-8"
+        )
+    # When planning, neither agent may silently overwrite the other.
+    with pytest.raises(ValueError, match="collision"):
+        preview(source, "codex")
+
+
+@pytest.mark.parametrize("path", ["codex/home/.codex/config.toml", "opencode-v2/home/.config/opencode/opencode.json"])
+def test_user_shared_mcp_names_cannot_collide(path) -> None:
+    from yi.shared_config import combine
+
+    # Given two independent contributions with an identical native MCP name.
+    if path.endswith("toml"):
+        pieces = ['[mcp_servers."a-b-c"]\ncommand="one"\n', '[mcp_servers."a-b-c"]\ncommand="two"\n']
+    else:
+        pieces = [json.dumps({"mcp": {"servers": {"a-b-c": {"command": [name]}}}}) for name in ("one", "two")]
+    # When composed, neither duplicate tables nor silent last-writer wins are allowed.
+    with pytest.raises(ValueError, match="collision"):
+        combine(path, pieces)
