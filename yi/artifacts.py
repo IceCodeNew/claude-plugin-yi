@@ -39,7 +39,7 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
             set(prior.get("reviewed_files", [])) | (set(prior.get("hashes", {})) - shared_config.SHARED)
         )
     owned = prior.get("hashes", {})
-    verify_owned(root, owned)
+    verify_owned(root, owned, set(prior.get("executables", [])))
     files, shared_metadata = shared_config.prepare(root, report, files)
     validate_new_files(root, {name: value for name, value in files.items() if name not in shared_config.SHARED}, owned)
     prior = {
@@ -98,14 +98,18 @@ def prepare_repository(root: Path) -> bool:
     return fresh
 
 
-def verify_owned(root: Path, hashes: dict[str, str]) -> None:
+def verify_owned(root: Path, hashes: dict[str, str], executable: set[str]) -> None:
     """Protect user edits even when those edits are already committed."""
     for relative, expected in hashes.items():
         path = root / relative
         if not path.resolve().is_relative_to(root.resolve()):
             msg = f"Owned artifact escapes root: {relative}"
             raise ValueError(msg)
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        if (
+            not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected
+            or bool(path.stat().st_mode & 0o111) != (relative in executable)
+        ):
             msg = f"Owned artifact was modified: {relative}. Review it before regeneration."
             raise ValueError(msg)
 

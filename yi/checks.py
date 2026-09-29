@@ -22,7 +22,11 @@ def inspect(root: Path) -> dict:
             if not path.resolve().is_relative_to(root):
                 msg = f"Manifest path escapes artifact root: {relative}"
                 raise ValueError(msg)
-            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            if (
+                not path.is_file()
+                or hashlib.sha256(path.read_bytes()).hexdigest() != expected
+                or bool(path.stat().st_mode & 0o111) != (relative in data.get("executables", []))
+            ):
                 changed.append(relative)
     return {"intact": not changed, "changed": sorted(changed), "components": components, "runtime_verified": False}
 

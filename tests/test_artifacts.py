@@ -448,3 +448,27 @@ def test_user_parent_file_conflict_does_not_partially_update_artifacts(tmp_path)
     with pytest.raises(ValueError, match="directory"):
         apply(root, report, {"pi/home/a": b"changed", "pi/home/new/child": b"child"})
     assert (root / "pi/home/a").read_bytes() == b"original"
+
+
+def test_user_unaccepted_execution_mode_change_is_not_overwritten(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+    from yi.checks import inspect
+
+    # Given a generated executable changed manually without acceptance.
+    root = tmp_path / "output"
+    report = {
+        "plugin": "demo",
+        "target": "pi",
+        "components": [],
+        "owners": {"pi/home/run.sh": "demo:run"},
+        "executables": ["pi/home/run.sh"],
+    }
+    apply(root, report, {"pi/home/run.sh": b"exit 0\n"})
+    (root / "pi/home/run.sh").chmod(0o600)
+    # When inspected and regenerated, report the edit and preserve the user's permission choice.
+    assert inspect(root)["intact"] is False
+    with pytest.raises(ValueError, match="modified"):
+        apply(root, report, {"pi/home/run.sh": b"exit 0\n"})
+    assert (root / "pi/home/run.sh").stat().st_mode & 0o777 == 0o600
