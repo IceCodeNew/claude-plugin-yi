@@ -27,20 +27,35 @@ def git(root: Path, *arguments: str) -> str:
 
 
 def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
-    """Commit one plugin-target unit while preserving unowned content."""
+    """Generate one source-target unit without staging or committing user files."""
     root = root.expanduser().absolute()
     fresh = prepare_repository(root)
     manifest_path = f"manifests/{report['target']}-{report['plugin']}.json"
     validate_paths(root, [manifest_path])
     previous = root / manifest_path
     prior = json.loads(previous.read_text(encoding="utf-8")) if previous.exists() else {}
+    if prior.get("reviewed_changes"):
+        prior["reviewed_files"] = sorted(
+            set(prior.get("reviewed_files", [])) | (set(prior.get("hashes", {})) - shared_config.SHARED)
+        )
     owned = prior.get("hashes", {})
     verify_owned(root, owned)
     files, shared_metadata = shared_config.prepare(root, report, files)
     validate_new_files(root, {name: value for name, value in files.items() if name not in shared_config.SHARED}, owned)
-    payload = merge_manifest(prior, report, files)
-    removed = set(owned) - set(payload["hashes"])
+    prior = {
+        **prior,
+        "hashes": {name: value for name, value in prior.get("hashes", {}).items() if name not in shared_config.SHARED},
+        "owners": {name: value for name, value in prior.get("owners", {}).items() if name not in shared_config.SHARED},
+    }
+    own_files = {name: content for name, content in files.items() if name not in shared_config.SHARED}
+    own_report = {
+        **report,
+        "owners": {name: value for name, value in report.get("owners", {}).items() if name not in shared_config.SHARED},
+    }
+    payload = merge_manifest(prior, own_report, own_files)
+    removed = set(owned) - set(payload["hashes"]) - shared_config.SHARED
     executable = set(payload["executables"])
+    protect_reviewed(prior, files, removed, executable)
     outputs = {
         **shared_metadata,
         **files,
@@ -50,18 +65,19 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
         outputs[".yi-artifacts.json"] = b'{"owner":"yi","schema":1}\n'
         outputs[".gitignore"] = b"**/.cache/\n**/auth.json\n**/auth.jsonc\n**/credentials.json\n**/.env\n**/*.log\n"
     validate_paths(root, list(outputs))
+    changed = bool(removed)
     for relative, content in outputs.items():
         destination = root / relative
+        mode = 0o755 if relative in executable else 0o644
+        if destination.is_file() and destination.read_bytes() == content and destination.stat().st_mode & 0o777 == mode:
+            continue
+        changed = True
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
-        destination.chmod(0o755 if relative in executable else 0o644)
+        destination.chmod(mode)
     for relative in removed:
         (root / relative).unlink()
-    git(root, "add", "--", *outputs, *sorted(removed))
-    if not git(root, "diff", "--cached", "--name-only"):
-        return False
-    git(root, "commit", "-m", f"feat: migrate {report['plugin']} to {report['target']}")
-    return True
+    return changed
 
 
 def prepare_repository(root: Path) -> bool:
@@ -75,16 +91,10 @@ def prepare_repository(root: Path) -> bool:
     root.mkdir(parents=True, exist_ok=True)
     fresh = not (root / ".git").exists()
     if fresh:
-        git(root, "var", "GIT_AUTHOR_IDENT")
-        git(root, "var", "GIT_COMMITTER_IDENT")
         git(root, "init", "--initial-branch=main")
     elif not (root / ".yi-artifacts.json").is_file():
         msg = "Existing repository is not owned by yi."
         raise ValueError(msg)
-    if git(root, "status", "--porcelain"):
-        msg = "Artifact repository has pending changes. Inspect and commit them before migration."
-        raise ValueError(msg)
-    git(root, "var", "GIT_AUTHOR_IDENT")
     return fresh
 
 
@@ -143,6 +153,21 @@ def merge_manifest(prior: dict, report: dict, files: dict[str, bytes]) -> dict:
         "owners": owners,
         "executables": sorted(executable),
         "components": components,
+        "reviewed_files": prior.get("reviewed_files", []),
         "configuration": report.get("configuration", {}),
         "complete": False,
     }
+
+
+def protect_reviewed(prior: dict, files: dict[str, bytes], removed: set[str], executable: set[str]) -> None:
+    """Keep accepted human edits installable without making them generator-owned."""
+    for name in prior.get("reviewed_files", []):
+        if name in removed or (
+            name in files
+            and (
+                hashlib.sha256(files[name]).hexdigest() != prior["hashes"][name]
+                or (name in executable) != (name in prior.get("executables", []))
+            )
+        ):
+            msg = f"Artifact contains reviewed changes: {name}. Reconcile the source before regeneration."
+            raise ValueError(msg)

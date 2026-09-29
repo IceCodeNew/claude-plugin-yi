@@ -12,11 +12,11 @@ SHARED = {
 
 
 def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str, bytes], dict[str, bytes]]:
-    """Merge only managed shared files and update all participating manifests."""
+    """Render per-plugin contributions under one target-level physical owner."""
     merged = dict(files)
     metadata = {}
     manifests = {}
-    for path in (root / "manifests").glob("*.json"):
+    for path in (root / "manifests").glob(f"{report['target']}-*.json"):
         if path.is_symlink():
             msg = "Shared manifest must not be a symlink."
             raise ValueError(msg)
@@ -33,6 +33,10 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
     if report.get("selection"):
         contributions = {**prior.get("configuration", {}), **contributions}
     report["configuration"] = contributions
+    owner_path = f"manifests/{report['target']}--shared.json"
+    target_owner = manifests.get(
+        root / owner_path, {"target": report["target"], "hashes": {}, "components": [], "executables": []}
+    )
     affected = set(contributions) | set(prior.get("configuration", {}))
     for name in sorted(affected):
         contribution = contributions.get(name)
@@ -47,15 +51,15 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
         pieces = [
             (data["plugin"], data.get("configuration", {}).get(name))
             for data in participants
-            if data.get("plugin") != report["plugin"]
+            if data.get("plugin") and data.get("plugin") != report["plugin"]
         ]
         pieces.append((report["plugin"], contribution))
         merged[name] = combine(name, [content for _, content in sorted(pieces) if content])
         digest = hashlib.sha256(merged[name]).hexdigest()
-        for path, data in manifests.items():
-            if data.get("plugin") != report["plugin"] and name in data.get("hashes", {}):
-                data["hashes"][name] = digest
-                metadata[str(path.relative_to(root))] = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode()
+        target_owner["hashes"][name] = digest
+    if affected:
+        metadata[owner_path] = encode(target_owner)
+        metadata.update(migrate_legacy_owners(root, manifests, affected))
     return merged, metadata
 
 
@@ -71,3 +75,24 @@ def combine(name: str, pieces: list[str]) -> bytes:
         for event, handlers in document.get("hooks", {}).items():
             result.setdefault("hooks", {}).setdefault(event, []).extend(handlers)
     return (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()
+
+
+def encode(document: dict) -> bytes:
+    """Serialize ownership metadata deterministically."""
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
+
+
+def migrate_legacy_owners(root: Path, manifests: dict, affected: set[str]) -> dict[str, bytes]:
+    """Remove legacy shared-file claims after validating the aggregate content."""
+    metadata = {}
+    for path, data in manifests.items():
+        if not data.get("plugin"):
+            continue
+        old_shared = set(data.get("hashes", {})) & affected
+        if old_shared:
+            for key in ("hashes", "owners"):
+                data[key] = {name: value for name, value in data.get(key, {}).items() if name not in affected}
+            for key in ("files", "executables"):
+                data[key] = [name for name in data.get(key, []) if name not in affected]
+            metadata[str(path.relative_to(root))] = encode(data)
+    return metadata

@@ -39,6 +39,7 @@ def accept_changes(root: Path) -> None:
         validate_paths(root, [str(manifest.relative_to(root))])
         data = json.loads(manifest.read_text(encoding="utf-8"))
         hashes = {}
+        reviewed = set(data.get("reviewed_files", []))
         executable = []
         for relative in data["hashes"]:
             validate_paths(root, [relative])
@@ -52,11 +53,15 @@ def accept_changes(root: Path) -> None:
             if relative in SHARED and digest != data["hashes"][relative]:
                 msg = f"Shared configuration requires source-fragment regeneration: {relative}"
                 raise ValueError(msg)
+            if digest != data["hashes"][relative] or bool(path.stat().st_mode & 0o111) != (
+                relative in data.get("executables", [])
+            ):
+                reviewed.add(relative)
             hashes[relative] = digest
             if path.stat().st_mode & 0o111:
                 executable.append(relative)
         data.update(hashes=hashes, files=sorted(hashes), executables=sorted(executable), complete=False)
-        data["reviewed_changes"] = True
+        data["reviewed_files"] = sorted(reviewed)
         updates[manifest] = json.dumps(data, indent=2, sort_keys=True) + "\n"
     for manifest, text in updates.items():
         manifest.write_text(text, encoding="utf-8")

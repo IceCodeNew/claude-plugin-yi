@@ -7,7 +7,7 @@ from pathlib import Path
 ENTRY = Path(__file__).resolve().parents[1] / "scripts/yi.py"
 
 
-def test_user_generates_one_git_commit_and_skips_unchanged_output(tmp_path) -> None:
+def test_user_generates_without_staging_and_skips_unchanged_output(tmp_path) -> None:
     # Given a skill-only plugin and explicit local Git identity for an isolated test repository.
     source = tmp_path / "source"
     (source / ".claude-plugin").mkdir(parents=True)
@@ -40,11 +40,11 @@ def test_user_generates_one_git_commit_and_skips_unchanged_output(tmp_path) -> N
     ]
     # When the user generates the same plugin twice.
     results = [subprocess.run(args, env=env, capture_output=True, text=True, check=False) for _ in range(2)]  # noqa: S603 - Fixed local CLI.
-    # Then the second run adds no commit and the generated skill is present.
+    # Then repeated generation is unchanged and Git staging remains the user's responsibility.
     for result in results:
         assert result.returncode == 0, result.stderr
-    assert json.loads(results[0].stdout)["committed"] is True
-    assert json.loads(results[1].stdout)["committed"] is False
+    assert json.loads(results[0].stdout)["changed"] is True
+    assert json.loads(results[1].stdout)["changed"] is False
     assert (root / ".git").is_dir()
     assert (root / "codex/home/.agents/skills/demo-check/SKILL.md").is_file()
 
@@ -158,7 +158,7 @@ def test_user_cannot_write_manifest_through_symlink(tmp_path) -> None:
     assert list(outside.iterdir()) == []
 
 
-def test_user_missing_identity_does_not_initialize_unowned_repository(tmp_path) -> None:
+def test_user_can_generate_without_git_identity(tmp_path) -> None:
     # Given an isolated Git environment with no identity.
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update(
@@ -175,7 +175,7 @@ def test_user_missing_identity_does_not_initialize_unowned_repository(tmp_path) 
     (source / ".claude-plugin").mkdir(parents=True)
     (source / ".claude-plugin/plugin.json").write_text('{"name":"demo"}', encoding="utf-8")
     output = tmp_path / "output"
-    # When migration fails identity preflight, then no unowned Git repository is left behind.
+    # When generating without identity, files remain usable in an initialized output repository.
     result = subprocess.run(  # noqa: S603 - Fixed local CLI with isolated Git configuration.
         [sys.executable, str(ENTRY), "migrate", "--source", str(source), "--target", "pi", "--output", str(output)],
         env=env,
@@ -183,8 +183,9 @@ def test_user_missing_identity_does_not_initialize_unowned_repository(tmp_path) 
         text=True,
         check=False,
     )
-    assert result.returncode != 0
-    assert not (output / ".git").exists()
+    assert result.returncode == 0, result.stderr
+    assert (output / ".git").is_dir()
+    assert (output / ".yi-artifacts.json").is_file()
 
 
 def test_user_partial_regeneration_removes_stale_selected_resources(tmp_path) -> None:
@@ -306,6 +307,11 @@ def test_user_removes_one_shared_mcp_contribution_without_removing_other_plugins
     config = json.loads((root / "opencode-v2/home/.config/opencode/opencode.json").read_text(encoding="utf-8"))
     assert set(config["mcp"]["servers"]) == {"beta-docs"}
     assert inspect(root)["intact"] is True
+    skill = tmp_path / "alpha/skills/check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nCheck.\n", encoding="utf-8")
+    apply(root, *preview(tmp_path / "alpha", "opencode-v2", ["alpha:check"]))
+    assert inspect(root)["intact"] is True
 
 
 def test_user_output_root_can_have_a_platform_symlink_ancestor(tmp_path) -> None:
@@ -345,3 +351,84 @@ def test_user_batch_failure_emits_json_and_marks_remaining_units_unattempted(tmp
     assert report["plans"][0]["status"] == "failed"
     assert report["plans"][1]["status"] == "not-attempted"
     assert not (output / ".git").exists()
+
+
+def test_user_reviewed_edits_are_not_overwritten_by_regeneration(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply, git
+    from yi.checks import accept_changes
+
+    root = tmp_path / "output"
+    root.mkdir()
+    git(root, "init", "--initial-branch=main")
+    git(root, "config", "user.name", "Fixture")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    (root / ".yi-artifacts.json").write_text('{"owner":"yi","schema":1}', encoding="utf-8")
+    git(root, "add", ".yi-artifacts.json")
+    git(root, "commit", "-m", "fixture: initialize")
+    report = {"plugin": "demo", "target": "pi", "components": [], "owners": {"pi/home/notes.txt": "demo:check"}}
+    apply(root, report, {"pi/home/notes.txt": b"generated"})
+    (root / "pi/home/notes.txt").write_bytes(b"human revision")
+    accept_changes(root)
+    git(root, "add", "pi/home/notes.txt", "manifests/pi-demo.json")
+    git(root, "commit", "-m", "fixture: accept reviewed change")
+    with pytest.raises(ValueError, match="reviewed"):
+        apply(root, report, {"pi/home/notes.txt": b"generated"})
+    assert (root / "pi/home/notes.txt").read_bytes() == b"human revision"
+
+
+def test_user_shared_configuration_has_one_owner_without_rewriting_other_plugins(tmp_path) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+    from yi.checks import inspect
+
+    root = tmp_path / "output"
+    for name in ("alpha", "beta"):
+        source = tmp_path / name
+        (source / ".claude-plugin").mkdir(parents=True)
+        (source / ".claude-plugin/plugin.json").write_text(json.dumps({"name": name}), encoding="utf-8")
+        (source / ".mcp.json").write_text('{"mcpServers":{"docs":{"command":"fixture"}}}', encoding="utf-8")
+    apply(root, *preview(tmp_path / "alpha", "opencode-v2"))
+    alpha = (root / "manifests/opencode-v2-alpha.json").read_bytes()
+    apply(root, *preview(tmp_path / "beta", "opencode-v2"))
+    assert (root / "manifests/opencode-v2-alpha.json").read_bytes() == alpha
+    assert inspect(root)["intact"] is True
+    manifests = [json.loads(path.read_text(encoding="utf-8")) for path in (root / "manifests").glob("*.json")]
+    path = "opencode-v2/home/.config/opencode/opencode.json"
+    assert sum(path in item["hashes"] for item in manifests) == 1
+
+
+def test_user_skill_generation_ignores_unrelated_corrupt_target_manifest(tmp_path) -> None:
+    from yi.artifacts import apply
+
+    root = tmp_path / "output"
+    apply(root, {"plugin": "demo", "target": "pi", "components": [], "owners": {}}, {})
+    (root / "manifests/codex-broken.json").write_text("invalid json", encoding="utf-8")
+    assert apply(
+        root,
+        {"plugin": "demo", "target": "pi", "components": [], "owners": {"pi/home/notes.txt": "demo:notes"}},
+        {"pi/home/notes.txt": b"notes"},
+    )
+
+
+def test_user_reviewed_executable_change_is_protected(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+    from yi.checks import accept_changes
+
+    root = tmp_path / "output"
+    report = {
+        "plugin": "demo",
+        "target": "pi",
+        "components": [],
+        "owners": {"pi/home/run.sh": "demo:run"},
+        "executables": ["pi/home/run.sh"],
+    }
+    apply(root, report, {"pi/home/run.sh": b"exit 0\n"})
+    (root / "pi/home/run.sh").chmod(0o644)
+    accept_changes(root)
+    with pytest.raises(ValueError, match="reviewed"):
+        apply(root, report, {"pi/home/run.sh": b"exit 0\n"})
+    assert not (root / "pi/home/run.sh").stat().st_mode & 0o111
