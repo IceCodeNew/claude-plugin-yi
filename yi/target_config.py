@@ -35,7 +35,7 @@ def mcp_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, byte
                 {
                     **item,
                     "status": "blocked",
-                    "reason": "Transport, credentials, or target version requires MCP adaptation.",
+                    "reason": mcp_blocker(server, target),
                 }
             )
         else:
@@ -228,4 +228,32 @@ def safe_url(value: object) -> bool:
         parsed.scheme == "https"
         and bool(parsed.hostname)
         and not any((parsed.username, parsed.password, parsed.query, parsed.fragment))
+    )
+
+
+def mcp_blocker(server: object, target: str) -> str:
+    """Explain the failed compatibility boundary without exposing source values."""
+    target_limits = {
+        "pi": (
+            "Pi native MCP support is not verified for the tested release. "
+            "Use a reviewed extension or compatible release."
+        ),
+        "ampcode": (
+            "Amp has no verified disabled-server export setting. Review its MCP activation policy before adaptation."
+        ),
+    }
+    if target in target_limits:
+        return target_limits[target]
+    if not isinstance(server, dict):
+        return "MCP server definition must be an object."
+    unsupported = set(server) - {"type", "command", "args", "url", "env", "headers"}
+    if unsupported:
+        return "Unsupported MCP fields: " + ", ".join(sorted(unsupported))
+    credential_fields = [field for field in ("env", "headers") if server.get(field)]
+    if credential_fields:
+        return "MCP fields require explicit credential mapping: " + ", ".join(credential_fields)
+    if "url" in server and not safe_url(server.get("url")):
+        return "MCP url must use HTTPS without embedded credentials, query parameters, or fragments."
+    return (
+        "MCP requires a supported stdio command with string args or an HTTP url. Review the transport and field types."
     )

@@ -530,3 +530,47 @@ def test_user_codex_template_substitution_is_not_silently_changed(tmp_path) -> N
     report, files = preview(source, "codex")
     assert not files
     assert report["components"][0]["status"] == "blocked"
+
+
+def test_user_gets_specific_mcp_blocker_for_target_limit(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a valid stdio MCP declaration and an unsupported target release.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / ".mcp.json").write_text('{"mcpServers":{"receipt":{"command":"fixture-server"}}}', encoding="utf-8")
+    # When planning Pi migration, the report distinguishes target support from invalid source data.
+    report, files = preview(source, "pi")
+    assert not files
+    reason = report["components"][0]["reason"]
+    assert "Pi" in reason
+    assert "native MCP" in reason
+
+
+def test_user_gets_specific_mcp_blocker_for_credentials(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a server with explicit credential-bearing headers.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "docs": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        "headers": {"Authorization": "fixture-secret"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # When planning conversion, name the rejected field without exposing its value.
+    report, files = preview(source, "codex")
+    assert not files
+    assert "headers" in report["components"][0]["reason"]
+    assert "fixture-secret" not in json.dumps(report)
