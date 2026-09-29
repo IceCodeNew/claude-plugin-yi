@@ -3,7 +3,7 @@ name: usage
 description: This skill shows local usage counts when the user asks for "yi statistics", "most used skills", or "查看调用统计".
 argument-hint: "[--group plugin|component]"
 disable-model-invocation: true
-allowed-tools: Bash
+allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/yi.py" usage *)
 ---
 
 # Usage statistics
