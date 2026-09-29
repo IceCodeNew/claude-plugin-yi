@@ -214,7 +214,7 @@ def compatible_hooks(groups: list) -> bool:
                 return False
             if handler.get("type") != "command" or not isinstance(handler.get("command"), str):
                 return False
-            if "${CLAUDE_PLUGIN_ROOT}" in handler["command"]:
+            if "CLAUDE_PLUGIN_ROOT" in handler["command"]:
                 return False
     return True
 

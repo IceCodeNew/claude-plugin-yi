@@ -90,7 +90,7 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
 
 def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | None:
     """Translate plain Markdown commands without execution semantics."""
-    roots = {"opencode-v2": ".config/opencode/commands", "pi": ".pi/agent/prompts"}
+    roots = {"opencode-v2": ".config/opencode/commands", "pi": ".pi/agent/prompts", "codex": ".codex/prompts"}
     if target not in roots:
         return None
     content = path.read_bytes()
@@ -102,9 +102,10 @@ def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | No
         if not separator:
             return None
         metadata = read_yaml(header)
-    if not isinstance(metadata, dict) or set(metadata) - {"description"}:
+    if not isinstance(metadata, dict) or set(metadata) - {"description", "argument-hint"}:
         return None
-    if any(token in text for token in ("$", "!`", "${CLAUDE_PLUGIN_ROOT}", "@")):
+    without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
+    if any(token in without_arguments for token in ("$", "!`", "@", "CLAUDE_PLUGIN_ROOT")):
         return None
     destination = Path(target) / "home" / roots[target] / f"{plugin}-{path.stem}.md"
     return str(destination), text.encode()
@@ -138,7 +139,7 @@ def convert_skill(path: Path, name: str) -> bytes | None:
     content = path.read_bytes()
     reject_sensitive(path, content)
     text = content.decode("utf-8")
-    if "${CLAUDE_PLUGIN_ROOT}" in text or "!`" in text or not text.startswith("---\n"):
+    if "CLAUDE_PLUGIN_ROOT" in text or "!`" in text or not text.startswith("---\n"):
         return None
     header, separator, body = text[4:].partition("\n---\n")
     if not separator:

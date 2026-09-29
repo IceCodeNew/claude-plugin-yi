@@ -429,3 +429,51 @@ def test_user_malformed_frontmatter_blocks_only_affected_skill(tmp_path) -> None
     report, files = preview(source, "pi")
     assert any(item["name"] == "sample:bad" and item["status"] == "blocked" for item in report["components"])
     assert any("sample-good" in name for name in files)
+
+
+def test_user_blocks_nested_plugin_root_hook_dependencies(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    (source / "hooks/hooks.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": 'ROOT="${CLAUDE_PLUGIN_ROOT:-}"; python "$ROOT/scripts/check.py"',
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report, files = preview(source, "codex")
+    assert "codex/home/.codex/hooks.json" not in files
+    assert any(item["kind"] == "hooks" and item["status"] == "blocked" for item in report["components"])
+
+
+@pytest.mark.parametrize("target", ["opencode-v2", "pi", "codex"])
+def test_user_migrates_prompt_arguments_to_native_templates(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/echo.md").write_text(
+        '---\ndescription: Echo arguments\nargument-hint: "[text]"\n---\nReply with $ARGUMENTS and $1.\n',
+        encoding="utf-8",
+    )
+    report, files = preview(source, target)
+    assert any(b"$ARGUMENTS" in content for content in files.values())
+    assert not any(item["status"] == "blocked" for item in report["components"])
