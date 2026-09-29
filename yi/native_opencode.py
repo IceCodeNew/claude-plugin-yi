@@ -31,16 +31,20 @@ def resources(executable: str, work: Path, environment: dict[str, str], expected
             password = server_password(process)
             token = base64.b64encode(f"opencode:{password}".encode()).decode()
             query = urllib.parse.urlencode({"location[directory]": str(work)})
-            url = f"http://127.0.0.1:{port}/api/skill?{query}"
+            url = f"http://127.0.0.1:{port}/api"
             deadline = time.monotonic() + 20
             found = []
             while time.monotonic() < deadline:
-                request = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
-                try:
-                    with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310 - Fixed localhost URL.
-                        found = [item["name"] for item in json.load(response)["data"]]
-                except (urllib.error.URLError, TimeoutError):
-                    found = []
+                found = []
+                for kind in ("skill", "command"):
+                    request = urllib.request.Request(  # noqa: S310 - URL is constructed only from localhost and fixed routes.
+                        f"{url}/{kind}?{query}", headers={"Authorization": f"Basic {token}"}
+                    )
+                    try:
+                        with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310 - Fixed localhost URL.
+                            found.extend(item["name"] for item in json.load(response)["data"])
+                    except (urllib.error.URLError, TimeoutError):
+                        continue
                 if set(expected).issubset(found):
                     return found
                 time.sleep(0.2)

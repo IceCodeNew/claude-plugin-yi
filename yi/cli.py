@@ -43,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     checker = commands.add_parser("check", help="Inspect generated artifact integrity without execution.")
     checker.add_argument("--output", type=Path, required=True)
     checker.add_argument("--json", action="store_true")
+    checker.add_argument(
+        "--accept-changes", action="store_true", help="Accept explicitly reviewed edits to tracked resources."
+    )
     checker.add_argument("--native", action="store_true", help="Run an explicit isolated native discovery check.")
     checker.add_argument("--target", choices=tuple(adapters.SKILL_ROOTS))
     checker.add_argument(
@@ -153,6 +156,8 @@ def selections_by_source(sources: list[Path], selected: list[str] | None) -> lis
 
 def run_check(args: argparse.Namespace) -> None:
     """Separate integrity reporting from optional native discovery."""
+    if args.accept_changes:
+        checks.accept_changes(args.output)
     report = checks.inspect(args.output)
     if args.native:
         if not args.target:

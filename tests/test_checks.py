@@ -141,3 +141,44 @@ def test_user_amp_check_requires_explicit_auth_access(tmp_path) -> None:
     # Given Amp discovery may access account metadata, default checks must not reuse credentials.
     result = check(tmp_path, "ampcode", executable)
     assert result["status"] == "authorization-required"
+
+
+def test_user_native_checks_prompt_only_pi_output(tmp_path) -> None:
+    import os
+
+    import pytest
+
+    from yi.native import check
+
+    executable = os.environ.get("YI_TEST_PI")
+    if not executable:
+        pytest.skip("Set YI_TEST_PI for native prompt discovery.")
+    prompts = tmp_path / "pi/home/.pi/agent/prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "yi-prompt-check.md").write_text("---\ndescription: Check\n---\nReply CHECK.\n", encoding="utf-8")
+    result = check(tmp_path, "pi", executable)
+    assert result["status"] == "discovered"
+    assert "yi-prompt-check" in result["found"]
+    assert result["cli_version"]
+
+
+def test_user_can_accept_reviewed_artifact_changes_without_claiming_behavior(tmp_path) -> None:
+    # Given a reviewed resource edited by the target harness.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    (root / "pi/home/notes.txt").write_bytes(b"reviewed")
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "target": "pi",
+                "plugin": "demo",
+                "components": [{"name": "demo:check", "status": "unverified"}],
+                "hashes": {"pi/home/notes.txt": hashlib.sha256(b"old").hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = run_cli(tmp_path, "check", "--output", str(root), "--accept-changes", "--json")
+    assert result["intact"] is True
+    assert result["runtime_verified"] is False

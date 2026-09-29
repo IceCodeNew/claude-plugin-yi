@@ -27,6 +27,9 @@ def check(root: Path, target: str, executable: str | None, *, allow_auth: bool =
         }
     source_home = root / target / "home"
     expected = sorted(path.parent.name for path in (source_home / SKILL_ROOTS[target]).rglob("SKILL.md"))
+    prompt_root = {"pi": ".pi/agent/prompts", "opencode-v2": ".config/opencode/commands"}.get(target)
+    if prompt_root:
+        expected.extend(path.stem for path in (source_home / prompt_root).rglob("*.md"))
     with tempfile.TemporaryDirectory(prefix="yi-native-") as temporary:
         home = Path(temporary) / "home"
         copy_discovery_resources(source_home, home, target)
@@ -34,6 +37,16 @@ def check(root: Path, target: str, executable: str | None, *, allow_auth: bool =
         work.mkdir()
         environment = isolated_environment(home)
         try:
+            version_result = subprocess.run(  # noqa: S603 - Explicit CLI version query with isolated configuration.
+                [resolved, "version" if target == "ampcode" else "--version"],
+                cwd=work,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            cli_version = version_result.stdout.strip()
             if target == "pi":
                 found = pi_resources(resolved, work, environment)
             elif target == "codex":
@@ -51,6 +64,7 @@ def check(root: Path, target: str, executable: str | None, *, allow_auth: bool =
         "found": found,
         "missing": missing,
         "behavior_verified": False,
+        "cli_version": cli_version,
     }
 
 
