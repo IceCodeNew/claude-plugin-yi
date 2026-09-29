@@ -306,3 +306,42 @@ def test_user_removes_one_shared_mcp_contribution_without_removing_other_plugins
     config = json.loads((root / "opencode-v2/home/.config/opencode/opencode.json").read_text(encoding="utf-8"))
     assert set(config["mcp"]["servers"]) == {"beta-docs"}
     assert inspect(root)["intact"] is True
+
+
+def test_user_output_root_can_have_a_platform_symlink_ancestor(tmp_path) -> None:
+    from yi.artifacts import validate_paths
+
+    # Given a platform-style directory alias above the selected root.
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    root = alias / "artifacts"
+    root.mkdir()
+    # When an internal regular path is checked, ancestor aliases do not count as output escapes.
+    validate_paths(root, ["pi/home/skill.md"])
+
+
+def test_user_batch_failure_emits_json_and_marks_remaining_units_unattempted(tmp_path) -> None:
+    # Given a nonempty unowned artifact root and two valid plugins.
+    sources = []
+    for name in ("alpha", "beta"):
+        source = tmp_path / name
+        (source / ".claude-plugin").mkdir(parents=True)
+        (source / ".claude-plugin/plugin.json").write_text(json.dumps({"name": name}), encoding="utf-8")
+        sources.extend(["--source", str(source)])
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "keep.txt").write_text("Unowned.", encoding="utf-8")
+    # When the first unit fails, the machine-readable report still covers both units.
+    result = subprocess.run(  # noqa: S603 - Fixed local CLI with isolated source and output files.
+        [sys.executable, str(ENTRY), "migrate", *sources, "--target", "pi", "--output", str(output), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report["plans"][0]["status"] == "failed"
+    assert report["plans"][1]["status"] == "not-attempted"
+    assert not (output / ".git").exists()

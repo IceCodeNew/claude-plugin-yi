@@ -13,7 +13,8 @@ from yi import adapters, artifacts, catalog, checks, config, history, install, n
 def parse_args() -> argparse.Namespace:
     """Parse private helper operations."""
     parser = argparse.ArgumentParser(description="Local invocation counts and harness migration.")
-    default_data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "yi"
+    xdg = Path(os.environ.get("XDG_DATA_HOME", ""))
+    default_data = (xdg if xdg.is_absolute() else Path.home() / ".local/share") / "yi"
     parser.add_argument("--data-dir", type=Path, default=default_data)
     commands = parser.add_subparsers(dest="command", required=True)
     collector = commands.add_parser("record", help="Record one hook event from standard input.")
@@ -64,8 +65,8 @@ def main() -> int:
     if args.command == "record":
         return collect(args)
     if args.command == "migrate":
-        run_migration(args)
-    elif args.command == "install":
+        return run_migration(args)
+    if args.command == "install":
         result = install.install(
             args.output, args.target, args.destination, apply=args.apply, accept_unverified=args.accept_unverified
         )
@@ -91,7 +92,7 @@ def main() -> int:
     return 0
 
 
-def run_migration(args: argparse.Namespace) -> None:
+def run_migration(args: argparse.Namespace) -> int:
     """Prepare all selected units before changing artifact files."""
     output = args.output or Path(config.configure(args.data_dir)["output_root"])
     selections = selections_by_source(args.source, args.item)
@@ -100,11 +101,20 @@ def run_migration(args: argparse.Namespace) -> None:
         for source, selected in selections
         for target in dict.fromkeys(args.target)
     ]
+    failed = False
     for report, files in plans:
-        if not args.dry_run:
-            report["committed"] = artifacts.apply(output, report, files)
+        if failed:
+            report["status"] = "not-attempted"
+        elif not args.dry_run:
+            try:
+                report["committed"] = artifacts.apply(output, report, files)
+            except (ValueError, OSError) as error:
+                report["status"] = "failed"
+                report["error"] = str(error)
+                failed = True
     result = plans[0][0] if len(plans) == 1 else {"plans": [report for report, _ in plans]}
     sys.stdout.write(json.dumps(result) + "\n")
+    return int(failed)
 
 
 def collect(args: argparse.Namespace) -> int:

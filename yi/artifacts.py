@@ -105,7 +105,7 @@ def validate_paths(root: Path, paths: list[str]) -> None:
     for relative in paths:
         path = root / relative
         if not path.resolve().is_relative_to(root.resolve()) or any(
-            parent.is_symlink() for parent in (path, *path.parents) if parent != root
+            parent.is_symlink() for parent in (path, *path.parents) if parent.is_relative_to(root)
         ):
             msg = f"Artifact path escapes root or follows a symlink: {relative}"
             raise ValueError(msg)
