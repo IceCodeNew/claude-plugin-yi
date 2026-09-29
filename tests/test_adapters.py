@@ -641,3 +641,37 @@ def test_user_agent_declared_twice_is_converted_once(tmp_path) -> None:
     report, files = preview(source, "codex")
     assert len(files) == 1
     assert len([item for item in report["components"] if item["kind"] == "agent"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("filename", "document"),
+    [
+        (".mcp.json", {"mcpServers": None}),
+        (".mcp.json", []),
+        ("hooks/hooks.json", {"hooks": None}),
+        ("hooks/hooks.json", []),
+    ],
+)
+def test_user_invalid_configuration_container_gets_json_failure(tmp_path, filename, document) -> None:
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given invalid external configuration types.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    path = source / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    # When previewed, report failure as JSON without an uncaught traceback.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated malformed input.
+        [sys.executable, str(ENTRY), "migrate", "--source", str(source), "--target", "codex", "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["stage"] == "preview"
+    assert "Traceback" not in result.stderr

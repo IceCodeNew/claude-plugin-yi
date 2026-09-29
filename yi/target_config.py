@@ -21,9 +21,11 @@ def mcp_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, byte
             msg = "MCP configuration must remain inside the source plugin."
             raise ValueError(msg)
         data = json.loads(path.read_text(encoding="utf-8"))
+        data = configuration_object(data, "MCP document")
         servers = data.get("mcpServers", data)
     else:
         return {}, []
+    servers = configuration_object(servers, "MCP servers")
     reject_sensitive(Path("mcp-config.json"), json.dumps(servers).encode())
     converted = {}
     diagnostics = []
@@ -177,6 +179,8 @@ def hook_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, byt
         document = json.loads(path.read_text(encoding="utf-8"))
     else:
         return {}, []
+    document = configuration_object(document, "Hook document")
+    events = configuration_object(document.get("hooks", {}), "Hook events")
     reject_sensitive(Path("hook-config.json"), json.dumps(document).encode())
     supported = {
         "PreToolUse",
@@ -194,7 +198,7 @@ def hook_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, byt
     }
     result = {}
     diagnostics = []
-    for event, groups in document.get("hooks", {}).items():
+    for event, groups in events.items():
         item = {"kind": "hooks", "name": f"{manifest['name']}:hooks:{event}"}
         if target != "codex" or event not in supported or not groups or not compatible_hooks(groups):
             diagnostics.append(
@@ -217,10 +221,17 @@ def hook_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, byt
 
 def compatible_hooks(groups: list) -> bool:
     """Accept only the shared declarative subset; do not imply semantic equivalence."""
+    if not isinstance(groups, list):
+        return False
     for group in groups:
-        if not isinstance(group, dict) or set(group) - {"matcher", "hooks"}:
+        if (
+            not isinstance(group, dict)
+            or set(group) - {"matcher", "hooks"}
+            or not isinstance(group.get("hooks", []), list)
+        ):
             return False
-        for handler in group.get("hooks", []):
+        handlers = group.get("hooks", [])
+        for handler in handlers:
             if not isinstance(handler, dict) or set(handler) - {"type", "command", "timeout", "async", "statusMessage"}:
                 return False
             if handler.get("type") != "command" or not isinstance(handler.get("command"), str):
@@ -268,3 +279,11 @@ def mcp_blocker(server: object, target: str) -> str:
     return (
         "MCP requires a supported stdio command with string args or an HTTP url. Review the transport and field types."
     )
+
+
+def configuration_object(value: object, label: str) -> dict:
+    """Reject invalid external container types before attribute access."""
+    if not isinstance(value, dict):
+        msg = f"{label} must be a JSON object."
+        raise TypeError(msg)
+    return value
