@@ -15,8 +15,8 @@ Record the source commit, installed plugin path, target CLI version, exact opera
 | A05 | Statistics | Invoke `/yi:usage`; compare displayed counts and descending order with the local database query. |
 | A06 | Selection | Select multiple sources and targets; unknown or ambiguous IDs fail without broadening the selection. |
 | A07 | Standalone resources | Discover and migrate a skill directory and Markdown command without a plugin manifest. |
-| A08 | Artifact ownership | Generate into a configured isolated root; one Git repository owns all targets, with one commit per source-target unit. |
-| A09 | Updates | Repeat an unchanged migration without a commit; replace selected resources while preserving unrelated components and user modifications. |
+| A08 | Artifact ownership | Generate into a configured isolated root; one Git repository owns all targets, without requiring identity, signatures, staging, or commits. |
+| A09 | Updates | Repeat an unchanged migration without file changes; replace selected resources while preserving unrelated components and user modifications. |
 | A10 | Installation | Preview without writes, then explicitly install into a separate target HOME; conflicts and symlinks are rejected. |
 | A11 | Skill behavior | Invoke each target's migrated skill and obtain a sentinel stored only in its bundled resource. Listing the skill is insufficient. |
 | A12 | Command behavior | Invoke a supported migrated command/template and obtain its defined sentinel. Verify unsupported targets and syntax produce explicit blockers. |
