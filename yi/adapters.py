@@ -24,6 +24,7 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
         msg = "Plugin name must use lowercase letters, digits, and hyphens."
         raise ValueError(msg)
     files = {}
+    owners = {}
     executables = []
     components = []
     inventory = discover(source)
@@ -44,6 +45,7 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
             else:
                 name, content = converted
                 files[name] = content
+                owners[name] = item["name"]
                 components.append(
                     {**item, "status": "unverified", "reason": "Native prompt prepared; verify target behavior."}
                 )
@@ -62,6 +64,7 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
         resources, executable_resources = skill_files(path.parent, destination)
         resources[str(destination / "SKILL.md")] = converted_skill
         files.update(resources)
+        owners.update(dict.fromkeys(resources, item["name"]))
         executables.extend(executable_resources)
         components.append({**item, "status": "unverified", "reason": "Files prepared; validate target skill behavior."})
     if not selected:
@@ -71,6 +74,7 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
         "selection": selected,
         "target": target,
         "files": sorted(files),
+        "owners": owners,
         "executables": sorted(executables),
         "components": components,
         "complete": False,
@@ -82,7 +86,9 @@ def command_file(path: Path, target: str, plugin: str) -> tuple[str, bytes] | No
     roots = {"opencode-v2": ".config/opencode/commands", "pi": ".pi/agent/prompts"}
     if target not in roots:
         return None
-    text = path.read_text(encoding="utf-8")
+    content = path.read_bytes()
+    reject_sensitive(path, content)
+    text = content.decode("utf-8")
     metadata = {}
     if text.startswith("---\n"):
         header, separator, _body = text[4:].partition("\n---\n")
@@ -110,9 +116,11 @@ def skill_files(source: Path, destination: Path) -> tuple[dict[str, bytes], list
             if resource.name.startswith(".env") or ".git" in relative.parts:
                 msg = f"Sensitive source resource requires review: {resource}"
                 raise ValueError(msg)
+            content = resource.read_bytes()
+            reject_sensitive(resource, content)
             name = str(destination / relative)
             if relative != Path("SKILL.md"):
-                files[name] = resource.read_bytes()
+                files[name] = content
             if resource.stat().st_mode & 0o111:
                 executables.append(name)
     return files, executables
@@ -120,7 +128,9 @@ def skill_files(source: Path, destination: Path) -> tuple[dict[str, bytes], list
 
 def convert_skill(path: Path, name: str) -> bytes | None:
     """Validate and namespace portable skill content in one pass."""
-    text = path.read_text(encoding="utf-8")
+    content = path.read_bytes()
+    reject_sensitive(path, content)
+    text = content.decode("utf-8")
     if "${CLAUDE_PLUGIN_ROOT}" in text or "!`" in text or not text.startswith("---\n"):
         return None
     header, separator, body = text[4:].partition("\n---\n")
@@ -135,7 +145,7 @@ def convert_skill(path: Path, name: str) -> bytes | None:
         "compatibility",
     }:
         return None
-    metadata["name"] = name
+    metadata = {**metadata, "name": name}
     parser = importlib.import_module("yaml")
     return ("---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body).encode()
 
@@ -183,3 +193,12 @@ def read_yaml(text: str) -> object:
         msg = "Migration requires PyYAML. Run the helper with uv run --with pyyaml."
         raise ValueError(msg) from error
     return parser.safe_load(text)
+
+
+def reject_sensitive(path: Path, content: bytes) -> None:
+    """Reject known credential resources before creating exportable bytes."""
+    names = {"credentials.json", "auth.json", "auth.jsonc", ".netrc", ".pypirc", "id_rsa", "id_ed25519"}
+    secret_header = re.search(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----", content)
+    if path.name.lower() in names or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"} or secret_header:
+        msg = f"Sensitive resource requires removal or explicit redaction: {path.name}"
+        raise ValueError(msg)

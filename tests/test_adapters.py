@@ -254,3 +254,44 @@ def test_user_gets_namespaced_skill_names_in_target_content(tmp_path) -> None:
     # When exported, then frontmatter and directory names agree for native discovery.
     _report, files = preview(source, "codex")
     assert b"name: sample-check" in files["codex/home/.agents/skills/sample-check/SKILL.md"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("private-key.pem", b"-----BEGIN " + b"PRIVATE KEY-----\nsynthetic fixture\n"),
+        ("notes.txt", b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----\nsynthetic fixture\n"),
+        ("credentials.json", b'{"token":"synthetic"}'),
+    ],
+)
+def test_user_cannot_export_sensitive_skill_resources(tmp_path, filename, content) -> None:
+    from yi.adapters import preview
+
+    # Given a portable skill containing a credential resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nCheck.\n", encoding="utf-8")
+    (skill / filename).write_bytes(content)
+    # When preparing files, then credentials are rejected before artifact writes.
+    with pytest.raises(ValueError, match="Sensitive"):
+        preview(source, "pi")
+
+
+def test_user_rejects_same_named_plugin_installations(tmp_path) -> None:
+    from yi.cli import selections_by_source
+
+    # Given two installations with the same selectable component identity.
+    sources = []
+    for version in ("one", "two"):
+        source = tmp_path / version
+        (source / ".claude-plugin").mkdir(parents=True)
+        (source / ".claude-plugin/plugin.json").write_text('{"name":"demo"}', encoding="utf-8")
+        (source / "skills/check").mkdir(parents=True)
+        (source / "skills/check/SKILL.md").write_text("Check.", encoding="utf-8")
+        sources.append(source)
+    # When an ambiguous identity is selected, then neither source is applied.
+    with pytest.raises(ValueError, match="Ambiguous"):
+        selections_by_source(sources, ["demo:check"])

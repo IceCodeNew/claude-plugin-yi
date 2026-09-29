@@ -115,6 +115,13 @@ def collect(args: argparse.Namespace) -> int:
 
 def selections_by_source(sources: list[Path], selected: list[str] | None) -> list[tuple[Path, list[str] | None]]:
     """Validate global selection once, then partition it by source."""
+    sources = list(dict.fromkeys(source.resolve() for source in sources))
+    plugin_names = [
+        json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["name"] for source in sources
+    ]
+    if len(plugin_names) != len(set(plugin_names)):
+        msg = "Ambiguous plugin installations; select one source for each plugin name."
+        raise ValueError(msg)
     if not selected:
         return [(source, None) for source in sources]
     inventories = [(source, {item["name"] for item in catalog.discover(source)}) for source in sources]
