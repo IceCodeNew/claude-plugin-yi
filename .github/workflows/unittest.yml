@@ -16,6 +16,11 @@ on:
       - 'tests/**'
       - 'uv.lock'
       - 'pyproject.toml'
+      - 'prek.toml'
+      - 'renovate.json'
+      - '.gitignore'
+      - 'README.md'
+      - 'docs/**'
   pull_request:
     paths:
       - '.github/workflows/unittest.yml'
@@ -27,6 +32,11 @@ on:
       - 'tests/**'
       - 'uv.lock'
       - 'pyproject.toml'
+      - 'prek.toml'
+      - 'renovate.json'
+      - '.gitignore'
+      - 'README.md'
+      - 'docs/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -95,3 +105,24 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
         report_type: test_results
         files: junit.xml
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: '3.14'
+    - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        enable-cache: auto
+        version: '0.12.5'
+    - name: Run repository quality checks
+      run: |
+        uv sync --frozen
+        uv run ruff check .
+        uv run ruff format --check .
+        uv tool run --from prek==0.5.3 prek run --all-files
+        git diff --exit-code
