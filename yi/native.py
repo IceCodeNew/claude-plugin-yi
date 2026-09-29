@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from yi import native_opencode
-from yi.adapters import SKILL_ROOTS
+from yi.targets import SKILL_ROOTS
 
 
 def check(root: Path, target: str, executable: str | None, *, allow_auth: bool = False) -> dict:

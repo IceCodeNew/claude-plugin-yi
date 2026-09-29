@@ -126,3 +126,23 @@ def test_user_counts_concurrent_calls_without_losing_updates(tmp_path) -> None:
         results = list(pool.map(collect_one, range(12)))
     assert all(result["recorded"] for result in results)
     assert run_cli(tmp_path, "usage", "--json")["items"] == [{"name": "sample:check", "count": 12}]
+
+
+def test_user_collection_starts_when_optional_migration_module_is_unavailable(tmp_path) -> None:
+    import shutil
+
+    # Given a checkout whose optional migration module cannot import.
+    root = tmp_path / "checkout"
+    shutil.copytree(ENTRY.parents[1] / "yi", root / "yi", ignore=shutil.ignore_patterns("__pycache__"))
+    (root / "scripts").mkdir()
+    shutil.copyfile(ENTRY, root / "scripts/yi.py")
+    (root / "yi/native.py").write_text('raise RuntimeError("optional native runtime unavailable")\n', encoding="utf-8")
+    # When collecting an event, optional capability startup cannot break the counter.
+    result = subprocess.run(  # noqa: S603 - Task-owned checkout and synthetic input.
+        [sys.executable, str(root / "scripts/yi.py"), "--data-dir", str(tmp_path / "data"), "record", "--hook"],
+        input='{"hook_event_name":"PostToolUse","tool_name":"Read"}',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

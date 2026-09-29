@@ -7,7 +7,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from yi import adapters, artifacts, catalog, checks, config, history, install, native, usage
+from yi import config, usage
+from yi.targets import SKILL_ROOTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     sources.add_argument("--json", action="store_true")
     migration = commands.add_parser("migrate", help="Prepare isolated migration artifacts.")
     migration.add_argument("--source", type=Path, action="append", required=True)
-    migration.add_argument("--target", choices=tuple(adapters.SKILL_ROOTS), action="append", required=True)
+    migration.add_argument("--target", choices=tuple(SKILL_ROOTS), action="append", required=True)
     migration.add_argument("--item", action="append", help="Select a complete component ID; repeat for multiple items.")
     migration.add_argument("--output", type=Path)
     migration.add_argument("--dry-run", action="store_true")
@@ -47,14 +48,14 @@ def parse_args() -> argparse.Namespace:
         "--accept-changes", action="store_true", help="Accept explicitly reviewed edits to tracked resources."
     )
     checker.add_argument("--native", action="store_true", help="Run an explicit isolated native discovery check.")
-    checker.add_argument("--target", choices=tuple(adapters.SKILL_ROOTS))
+    checker.add_argument("--target", choices=tuple(SKILL_ROOTS))
     checker.add_argument(
         "--allow-auth", action="store_true", help="Allow Amp to use existing authentication for discovery."
     )
     checker.add_argument("--executable", help="Use a specific native CLI executable.")
     installer = commands.add_parser("install", help="Preview or explicitly install generated artifacts.")
     installer.add_argument("--output", type=Path, required=True)
-    installer.add_argument("--target", choices=tuple(adapters.SKILL_ROOTS), required=True)
+    installer.add_argument("--target", choices=tuple(SKILL_ROOTS), required=True)
     installer.add_argument("--destination", type=Path, required=True)
     installer.add_argument("--apply", action="store_true")
     installer.add_argument("--accept-unverified", action="store_true")
@@ -70,6 +71,8 @@ def main() -> int:
     if args.command == "migrate":
         return run_migration(args)
     if args.command == "install":
+        from yi import install  # noqa: PLC0415 - Load optional capability only when selected.
+
         result = install.install(
             args.output, args.target, args.destination, apply=args.apply, accept_unverified=args.accept_unverified
         )
@@ -79,11 +82,16 @@ def main() -> int:
     elif args.command == "config":
         sys.stdout.write(json.dumps(config.configure(args.data_dir, args.output)) + "\n")
     elif args.command == "catalog":
-        sys.stdout.write(
-            json.dumps({"items": catalog.discover(args.source) if args.source else catalog.installed(args.claude_dir)})
-            + "\n"
-        )
+        from yi import catalog  # noqa: PLC0415 - Collection must not load source discovery.
+
+        items = catalog.discover(args.source) if args.source else catalog.installed(args.claude_dir)
+        counts = {item["name"]: item["count"] for item in usage.ranked(args.data_dir, "component")}
+        plugins = {item["name"]: item["count"] for item in usage.ranked(args.data_dir, "plugin")}
+        ranked_items = catalog.rank(items, counts, plugins)
+        sys.stdout.write(json.dumps({"items": ranked_items}) + "\n")
     elif args.command == "history":
+        from yi import history  # noqa: PLC0415 - Collection does not need transcript import.
+
         sys.stdout.write(json.dumps(history.import_history(args.data_dir, args.source)) + "\n")
     else:
         items = usage.ranked(args.data_dir, args.group)
@@ -97,6 +105,8 @@ def main() -> int:
 
 def run_migration(args: argparse.Namespace) -> int:
     """Prepare all selected units before changing artifact files."""
+    from yi import adapters, artifacts  # noqa: PLC0415 - Isolate migration startup from hooks.
+
     output = args.output or Path(config.configure(args.data_dir)["output_root"])
     selections = selections_by_source(args.source, args.item)
     plans = [
@@ -110,7 +120,7 @@ def run_migration(args: argparse.Namespace) -> int:
             report["status"] = "not-attempted"
         elif not args.dry_run:
             try:
-                report["committed"] = artifacts.apply(output, report, files)
+                report["changed"] = artifacts.apply(output, report, files)
             except (ValueError, OSError) as error:
                 report["status"] = "failed"
                 report["error"] = str(error)
@@ -134,6 +144,8 @@ def collect(args: argparse.Namespace) -> int:
 
 def selections_by_source(sources: list[Path], selected: list[str] | None) -> list[tuple[Path, list[str] | None]]:
     """Validate global selection once, then partition it by source."""
+    from yi import catalog  # noqa: PLC0415 - Source discovery belongs to migration.
+
     sources = list(dict.fromkeys(catalog.checked_source(source) for source in sources))
     plugin_names = [catalog.source_manifest(source)["name"] for source in sources]
     if len(plugin_names) != len(set(plugin_names)):
@@ -142,6 +154,10 @@ def selections_by_source(sources: list[Path], selected: list[str] | None) -> lis
     if not selected:
         return [(source, None) for source in sources]
     inventories = [(source, {item["name"] for item in catalog.discover(source)}) for source in sources]
+    for name in selected:
+        if sum(name in names for _, names in inventories) > 1:
+            msg = f"Ambiguous selected component: {name}. Choose one source explicitly."
+            raise ValueError(msg)
     available = set().union(*(names for _, names in inventories))
     missing = set(selected) - available
     if missing:
@@ -156,10 +172,14 @@ def selections_by_source(sources: list[Path], selected: list[str] | None) -> lis
 
 def run_check(args: argparse.Namespace) -> None:
     """Separate integrity reporting from optional native discovery."""
+    from yi import checks  # noqa: PLC0415 - Integrity checks are opt-in.
+
     if args.accept_changes:
         checks.accept_changes(args.output)
     report = checks.inspect(args.output)
     if args.native:
+        from yi import native  # noqa: PLC0415 - Native process/network dependencies are explicit.
+
         if not args.target:
             msg = "Native checking requires --target."
             raise ValueError(msg)

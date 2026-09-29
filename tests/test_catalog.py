@@ -143,3 +143,23 @@ def test_user_catalog_keeps_valid_sources_when_one_install_is_missing(tmp_path) 
     result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
     assert any(item["name"] == "check" for item in result["items"])
     assert any(item["name"] == "lost" and item["status"] == "unresolved" for item in result["items"])
+
+
+def test_user_catalog_ranks_counts_deterministically(tmp_path) -> None:
+    root = tmp_path / "claude"
+    for name in ("alpha", "beta"):
+        (root / "skills" / name).mkdir(parents=True)
+        (root / "skills" / name / "SKILL.md").write_text("Check.", encoding="utf-8")
+    run_cli(
+        tmp_path,
+        "record",
+        event={
+            "hook_event_name": "PostToolUse",
+            "session_id": "s",
+            "tool_use_id": "t",
+            "tool_name": "Skill",
+            "tool_input": {"skill": "beta"},
+        },
+    )
+    result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
+    assert [(item["name"], item["count"]) for item in result["items"]] == [("beta", 1), ("alpha", 0)]

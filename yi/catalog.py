@@ -112,3 +112,11 @@ def checked_source(source: Path) -> Path:
         msg = f"Source symlink requires review: {source}"
         raise ValueError(msg)
     return source.resolve()
+
+
+def rank(items: list[dict], counts: dict[str, int], plugins: dict[str, int]) -> list[dict]:
+    """Join observable counts without losing source identity or zero-use items."""
+    result = [
+        {**item, "count": (plugins if item["kind"] == "plugin" else counts).get(item["name"], 0)} for item in items
+    ]
+    return sorted(result, key=lambda item: (-item["count"], item["name"], item["path"]))
