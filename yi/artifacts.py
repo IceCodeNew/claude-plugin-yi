@@ -114,6 +114,12 @@ def validate_paths(root: Path, paths: list[str]) -> None:
     """Validate every output, including metadata, before any write."""
     for relative in paths:
         path = root / relative
+        for parent in path.parents:
+            if parent == root:
+                break
+            if parent.exists() and not parent.is_dir():
+                msg = f"Artifact parent is not a directory: {parent}"
+                raise ValueError(msg)
         if not path.resolve().is_relative_to(root.resolve()) or any(
             parent.is_symlink() for parent in (path, *path.parents) if parent.is_relative_to(root)
         ):

@@ -432,3 +432,19 @@ def test_user_reviewed_executable_change_is_protected(tmp_path) -> None:
     with pytest.raises(ValueError, match="reviewed"):
         apply(root, report, {"pi/home/run.sh": b"exit 0\n"})
     assert not (root / "pi/home/run.sh").stat().st_mode & 0o111
+
+
+def test_user_parent_file_conflict_does_not_partially_update_artifacts(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+
+    # Given a generated file and an unowned file where a future directory is needed.
+    root = tmp_path / "output"
+    report = {"plugin": "demo", "target": "pi", "components": [], "owners": {"pi/home/a": "demo:a"}}
+    apply(root, report, {"pi/home/a": b"original"})
+    (root / "pi/home/new").write_bytes(b"unowned")
+    # When a plan updates a and creates new/child, preflight rejects the parent conflict before any write.
+    with pytest.raises(ValueError, match="directory"):
+        apply(root, report, {"pi/home/a": b"changed", "pi/home/new/child": b"child"})
+    assert (root / "pi/home/a").read_bytes() == b"original"
