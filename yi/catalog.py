@@ -66,23 +66,10 @@ def installed(root: Path) -> list[dict[str, str]]:
     for index_name, entries in data["plugins"].items():
         for entry in entries:
             source = Path(entry["installPath"])
-            if source not in seen:
-                if not source.is_dir() or not (source / ".claude-plugin/plugin.json").is_file():
-                    items.append(
-                        {
-                            "name": index_name.split("@", 1)[0],
-                            "kind": "plugin",
-                            "source": str(source),
-                            "path": str(source),
-                            "status": "unresolved",
-                            "reason": "Installed source or manifest is missing; select a valid source explicitly.",
-                        }
-                    )
-                    continue
-                manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
-                items.append({"name": manifest["name"], "kind": "plugin", "source": str(source), "path": str(source)})
-                items.extend({**item, "source": str(source)} for item in discover(source))
-                seen.add(source)
+            if source in seen:
+                continue
+            seen.add(source)
+            items.extend(installed_entry(source, index_name))
     return items
 
 
@@ -123,3 +110,17 @@ def rank(items: list[dict], counts: dict[str, int], plugins: dict[str, int]) -> 
         {**item, "count": (plugins if item["kind"] == "plugin" else counts).get(item["name"], 0)} for item in items
     ]
     return sorted(result, key=lambda item: (-item["count"], item["name"], item["path"]))
+
+
+def installed_entry(source: Path, index_name: str) -> list[dict[str, str]]:
+    """Keep one invalid installation from hiding unrelated catalog entries."""
+    unresolved = {"name": index_name.split("@", 1)[0], "kind": "plugin", "source": str(source), "path": str(source)}
+    try:
+        manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        name = manifest["name"]
+        if not isinstance(name, str) or not name:
+            return [{**unresolved, "status": "unresolved", "reason": "Plugin name must be a nonempty string."}]
+        components = discover(source)
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        return [{**unresolved, "status": "unresolved", "reason": str(error)}]
+    return [{**unresolved, "name": name}, *({**item, "source": str(source)} for item in components)]

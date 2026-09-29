@@ -180,3 +180,21 @@ def test_user_discovers_explicit_skill_directory_under_aliased_parent(tmp_path) 
     # When discovered, the directory's own SKILL.md is not omitted.
     result = run_cli(tmp_path, "catalog", "--source", str(alias / "plugin"), "--json")
     assert [item["name"] for item in result["items"]] == ["sample:check"]
+
+
+def test_user_catalog_reports_corrupt_plugin_without_losing_valid_items(tmp_path) -> None:
+    # Given an installed plugin with malformed metadata and a valid standalone skill.
+    root = tmp_path / "claude"
+    broken = tmp_path / "broken"
+    (broken / ".claude-plugin").mkdir(parents=True)
+    (broken / ".claude-plugin/plugin.json").write_text("{invalid", encoding="utf-8")
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text(
+        json.dumps({"plugins": {"broken@local": [{"installPath": str(broken)}]}}), encoding="utf-8"
+    )
+    (root / "skills/good").mkdir(parents=True)
+    (root / "skills/good/SKILL.md").write_text("Good.", encoding="utf-8")
+    # When listed, the invalid entry is unresolved instead of aborting the catalog.
+    result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
+    assert any(item["name"] == "good" for item in result["items"])
+    assert any(item["name"] == "broken" and item["status"] == "unresolved" for item in result["items"])
