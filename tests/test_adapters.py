@@ -295,3 +295,120 @@ def test_user_rejects_same_named_plugin_installations(tmp_path) -> None:
     # When an ambiguous identity is selected, then neither source is applied.
     with pytest.raises(ValueError, match="Ambiguous"):
         selections_by_source(sources, ["demo:check"])
+
+
+def test_user_migrates_a_standalone_skill_directory(tmp_path) -> None:
+    # Given a skill directory without a plugin manifest.
+    source = tmp_path / "check"
+    source.mkdir()
+    (source / "SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nRead notes.txt.\n", encoding="utf-8")
+    (source / "notes.txt").write_text("Notes.", encoding="utf-8")
+    # When selected directly, then resources are planned under a standalone identity.
+    result = run_cli(tmp_path, "migrate", "--source", str(source), "--target", "pi", "--dry-run", "--json")
+    assert any(path.endswith("/notes.txt") for path in result["files"])
+    assert result["components"][0]["name"] == "check"
+
+
+def test_user_converts_disabled_mcp_for_opencode(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a local MCP declaration without embedded credentials.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "docs": {"command": "node", "args": ["server.js"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # When converted, the server is disabled until explicitly reviewed and enabled.
+    report, files = preview(source, "opencode-v2")
+    configs = [json.loads(content) for name, content in files.items() if name.endswith("opencode.json")]
+    assert configs
+    assert configs[0]["mcp"]["servers"]["sample-docs"]["disabled"] is True
+    assert not any(item["kind"] == "mcp" and item["status"] == "blocked" for item in report["components"])
+
+
+@pytest.mark.parametrize("target", ["codex", "opencode-v2"])
+def test_user_converts_plain_agent_to_native_definition(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given an agent with descriptive metadata and no special tool permissions.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Review text\n---\nReview the supplied text.\n", encoding="utf-8"
+    )
+    # When converted, target-native agent content is emitted and remains behavior-unverified.
+    report, files = preview(source, target)
+    assert any(b"Review the supplied text." in content for content in files.values())
+    assert any(item["kind"] == "agent" and item["status"] == "unverified" for item in report["components"])
+
+
+def test_user_converts_codex_command_hook_declarations_without_trust(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a supported command hook that does not depend on plugin-root expansion.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    (source / "hooks/hooks.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "printf done", "timeout": 5}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # When translated, hook trust is never granted and execution remains unverified.
+    report, files = preview(source, "codex")
+    output = files["codex/home/.codex/hooks.json"]
+    assert b"trusted_hash" not in output
+    assert json.loads(output)["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == "printf done"
+    assert any(item["kind"] == "hooks" and item["status"] == "unverified" for item in report["components"])
+
+
+def test_user_blocks_mcp_url_with_embedded_credentials(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    # Given credentials embedded in a remote URL, they must not enter a Git artifact.
+    (source / ".mcp.json").write_text(
+        '{"mcpServers":{"docs":{"type":"http","url":"https://user:secret@example.invalid/mcp?token=private"}}}',
+        encoding="utf-8",
+    )
+    report, files = preview(source, "codex")
+    assert files == {}
+    assert any(item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_rejects_secrets_inside_agent_prompt(tmp_path) -> None:
+    from yi.adapters import preview
+
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Review\n---\n" + "-----BEGIN " + "PRIVATE KEY-----\nfixture",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Sensitive"):
+        preview(source, "codex")

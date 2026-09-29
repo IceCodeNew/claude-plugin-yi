@@ -254,3 +254,55 @@ def test_user_generated_skill_survives_check_and_install(tmp_path) -> None:
     assert b"name: demo-check" in (installed / "SKILL.md").read_bytes()
     assert (installed / "run.sh").read_bytes() == b"#!/bin/sh\nexit 0\n"
     assert (installed / "run.sh").stat().st_mode & 0o111
+
+
+def test_user_combines_opencode_mcp_from_two_plugins(tmp_path) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply, git
+
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    git(root, "init", "--initial-branch=main")
+    git(root, "config", "user.name", "Fixture")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    (root / ".yi-artifacts.json").write_text('{"owner":"yi","schema":1}', encoding="utf-8")
+    git(root, "add", ".yi-artifacts.json")
+    git(root, "commit", "-m", "fixture: initialize")
+    # Given two plugins defining independently named disabled MCP servers.
+    for name in ("alpha", "beta"):
+        source = tmp_path / name
+        (source / ".claude-plugin").mkdir(parents=True)
+        (source / ".claude-plugin/plugin.json").write_text(json.dumps({"name": name}), encoding="utf-8")
+        (source / ".mcp.json").write_text('{"mcpServers":{"docs":{"command":"fixture-server"}}}', encoding="utf-8")
+        report, files = preview(source, "opencode-v2")
+        apply(root, report, files)
+    # Then one target config contains both server declarations.
+    config = json.loads((root / "opencode-v2/home/.config/opencode/opencode.json").read_text(encoding="utf-8"))
+    assert set(config["mcp"]["servers"]) == {"alpha-docs", "beta-docs"}
+
+
+def test_user_removes_one_shared_mcp_contribution_without_removing_other_plugins(tmp_path) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply, git
+    from yi.checks import inspect
+
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    git(root, "init", "--initial-branch=main")
+    git(root, "config", "user.name", "Fixture")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    (root / ".yi-artifacts.json").write_text('{"owner":"yi","schema":1}', encoding="utf-8")
+    git(root, "add", ".yi-artifacts.json")
+    git(root, "commit", "-m", "fixture: initialize")
+    for name in ("alpha", "beta"):
+        source = tmp_path / name
+        (source / ".claude-plugin").mkdir(parents=True)
+        (source / ".claude-plugin/plugin.json").write_text(json.dumps({"name": name}), encoding="utf-8")
+        (source / ".mcp.json").write_text('{"mcpServers":{"docs":{"command":"fixture-server"}}}', encoding="utf-8")
+        apply(root, *preview(source, "opencode-v2"))
+    # When alpha no longer declares a server, beta's shared configuration remains valid.
+    (tmp_path / "alpha/.mcp.json").unlink()
+    apply(root, *preview(tmp_path / "alpha", "opencode-v2"))
+    config = json.loads((root / "opencode-v2/home/.config/opencode/opencode.json").read_text(encoding="utf-8"))
+    assert set(config["mcp"]["servers"]) == {"beta-docs"}
+    assert inspect(root)["intact"] is True

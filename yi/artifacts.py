@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from yi import shared_config
+
 
 def git(root: Path, *arguments: str) -> str:
     """Run Git without a shell and retain actionable failures."""
@@ -34,11 +36,16 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
     prior = json.loads(previous.read_text(encoding="utf-8")) if previous.exists() else {}
     owned = prior.get("hashes", {})
     verify_owned(root, owned)
-    validate_new_files(root, files, owned)
+    files, shared_metadata = shared_config.prepare(root, report, files)
+    validate_new_files(root, {name: value for name, value in files.items() if name not in shared_config.SHARED}, owned)
     payload = merge_manifest(prior, report, files)
     removed = set(owned) - set(payload["hashes"])
     executable = set(payload["executables"])
-    outputs = {**files, manifest_path: (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()}
+    outputs = {
+        **shared_metadata,
+        **files,
+        manifest_path: (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+    }
     if fresh:
         outputs[".yi-artifacts.json"] = b'{"owner":"yi","schema":1}\n'
         outputs[".gitignore"] = b"**/.cache/\n**/auth.json\n**/auth.jsonc\n**/credentials.json\n**/.env\n**/*.log\n"
@@ -136,5 +143,6 @@ def merge_manifest(prior: dict, report: dict, files: dict[str, bytes]) -> dict:
         "owners": owners,
         "executables": sorted(executable),
         "components": components,
+        "configuration": report.get("configuration", {}),
         "complete": False,
     }

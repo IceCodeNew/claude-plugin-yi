@@ -96,3 +96,31 @@ def test_user_sees_plugins_without_skills_in_installed_catalog(tmp_path) -> None
     # When the catalog is requested, then whole-plugin selection remains possible.
     result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
     assert any(item["name"] == "hooks-only" and item["kind"] == "plugin" for item in result["items"])
+
+
+def test_user_discovers_standalone_skills_and_commands_without_plugin_index(tmp_path) -> None:
+    # Given a Claude directory with standalone resources and no plugin index.
+    root = tmp_path / "claude"
+    (root / "skills/check").mkdir(parents=True)
+    (root / "skills/check/SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nCheck.\n", encoding="utf-8")
+    (root / "commands").mkdir()
+    (root / "commands/build.md").write_text("Build.", encoding="utf-8")
+    # When the local catalog is requested, both entries expose direct migration sources.
+    items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
+    assert {(item["name"], item["kind"]) for item in items} == {("check", "skill"), ("build", "command")}
+    assert all(item["source"] for item in items)
+
+
+def test_user_rejects_linked_standalone_source(tmp_path) -> None:
+    import pytest
+
+    from yi.catalog import discover
+
+    # Given a standalone command linked to a file outside its advertised source.
+    outside = tmp_path / "outside.md"
+    outside.write_text("Private text.", encoding="utf-8")
+    linked = tmp_path / "command.md"
+    linked.symlink_to(outside)
+    # When discovery runs, then explicit source selection cannot bypass link protection.
+    with pytest.raises(ValueError, match="symlink"):
+        discover(linked)

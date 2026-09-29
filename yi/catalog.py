@@ -1,14 +1,27 @@
 """Discover local plugin components without executing their content."""
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 
 def discover(source: Path) -> list[dict[str, str]]:
     """List conventional plugin skills and legacy commands."""
-    source = source.resolve()
-    manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+    source = checked_source(source)
+    manifest = source_manifest(source)
     plugin = manifest["name"]
+    if manifest.get("standalone"):
+        path = source / "SKILL.md" if source.is_dir() else source
+        return [
+            {
+                "name": path.parent.name if path.name == "SKILL.md" else path.stem,
+                "kind": "skill" if path.name == "SKILL.md" else "command",
+                "plugin": plugin,
+                "path": str(path),
+                "source": str(source),
+            }
+        ]
     items = []
     for kind, folder, pattern in (("skill", "skills", "*/SKILL.md"), ("command", "commands", "**/*.md")):
         for base in component_roots(source, folder, manifest.get(folder, [])):
@@ -44,10 +57,8 @@ def component_roots(source: Path, folder: str, declared: str | list[str]) -> lis
 def installed(root: Path) -> list[dict[str, str]]:
     """Discover indexed plugin installations without loading plugin code."""
     index = root / "plugins/installed_plugins.json"
-    if not index.exists():
-        return []
-    data = json.loads(index.read_text(encoding="utf-8"))
-    items = []
+    data = json.loads(index.read_text(encoding="utf-8")) if index.exists() else {"plugins": {}}
+    items = standalone_items(root)
     seen = set()
     for entries in data["plugins"].values():
         for entry in entries:
@@ -58,3 +69,34 @@ def installed(root: Path) -> list[dict[str, str]]:
                 items.extend({**item, "source": str(source)} for item in discover(source))
                 seen.add(source)
     return items
+
+
+def source_manifest(source: Path) -> dict:
+    """Describe a plugin or a directly selected standalone resource."""
+    manifest = source / ".claude-plugin/plugin.json"
+    if manifest.is_file():
+        return json.loads(manifest.read_text(encoding="utf-8"))
+    skill = source / "SKILL.md" if source.is_dir() else source
+    if not skill.is_file() or skill.suffix != ".md":
+        msg = f"Source is not a plugin, skill directory, or Markdown command: {source}"
+        raise ValueError(msg)
+    name = skill.parent.name if skill.name == "SKILL.md" else skill.stem
+    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "item"
+    digest = hashlib.sha256(str(source.resolve()).encode()).hexdigest()[:10]
+    return {"name": f"standalone-{slug}-{digest}", "standalone": True}
+
+
+def standalone_items(root: Path) -> list[dict[str, str]]:
+    """Discover user or project resources independent of installed plugins."""
+    sources = [path.parent for path in sorted((root / "skills").glob("*/SKILL.md"))]
+    sources.extend(sorted((root / "commands").rglob("*.md")))
+    return [item for source in sources for item in discover(source)]
+
+
+def checked_source(source: Path) -> Path:
+    """Resolve explicit source paths only after rejecting symlink components."""
+    source = source.expanduser().absolute()
+    if any(path.is_symlink() for path in (source, *source.parents)):
+        msg = f"Source symlink requires review: {source}"
+        raise ValueError(msg)
+    return source.resolve()

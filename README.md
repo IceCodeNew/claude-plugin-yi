@@ -25,7 +25,11 @@ Choose an output root in `/yi:migrate`. yi initializes one Git repository there 
 
 Inspect generated files and component diagnostics before installation. Configuration isolation does not provide an operating-system sandbox. Do not execute untrusted scripts or MCP servers merely to check copied files.
 
-The converter prepares portable skill directories and plain Markdown commands for supported destinations. Claude-specific metadata, hooks, agents, MCP declarations, and unknown capabilities can require target-harness assistance. A blocked or unverified report is not a complete migration. Native discovery and behavioral verification remain distinct from file integrity checks.
+Select plugin components, standalone skill directories, or standalone Markdown commands. Portable skills retain their resources. OpenCode v2 and Pi accept plain Markdown command conversions. Codex and OpenCode v2 accept supported agent definitions and disabled MCP declarations. Codex command-hook declarations remain untrusted and require protocol review before use. Unsupported fields and target capabilities receive per-component blockers.
+
+Use the migration flow's native check to discover generated skills with the installed target CLI. Checks use disposable configuration roots and do not execute migrated hooks, extensions, or MCP servers. Amp authentication requires explicit approval. Native discovery does not verify behavior; a blocked or unverified report is not a complete migration.
+
+Migration requires PyYAML. When it is absent, run the helper through `uv run --no-project --with 'pyyaml>=6,<7' python`. The collector and usage display use Python's standard library. Development dependency resolution uses the index declared in `pyproject.toml`.
 
 ## Development
 

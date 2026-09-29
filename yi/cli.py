@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from yi import adapters, artifacts, catalog, checks, config, history, install, usage
+from yi import adapters, artifacts, catalog, checks, config, history, install, native, usage
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     checker = commands.add_parser("check", help="Inspect generated artifact integrity without execution.")
     checker.add_argument("--output", type=Path, required=True)
     checker.add_argument("--json", action="store_true")
+    checker.add_argument("--native", action="store_true", help="Run an explicit isolated native discovery check.")
+    checker.add_argument("--target", choices=tuple(adapters.SKILL_ROOTS))
+    checker.add_argument(
+        "--allow-auth", action="store_true", help="Allow Amp to use existing authentication for discovery."
+    )
+    checker.add_argument("--executable", help="Use a specific native CLI executable.")
     installer = commands.add_parser("install", help="Preview or explicitly install generated artifacts.")
     installer.add_argument("--output", type=Path, required=True)
     installer.add_argument("--target", choices=tuple(adapters.SKILL_ROOTS), required=True)
@@ -65,7 +71,7 @@ def main() -> int:
         )
         sys.stdout.write(json.dumps(result) + "\n")
     elif args.command == "check":
-        sys.stdout.write(json.dumps(checks.inspect(args.output)) + "\n")
+        run_check(args)
     elif args.command == "config":
         sys.stdout.write(json.dumps(config.configure(args.data_dir, args.output)) + "\n")
     elif args.command == "catalog":
@@ -115,10 +121,8 @@ def collect(args: argparse.Namespace) -> int:
 
 def selections_by_source(sources: list[Path], selected: list[str] | None) -> list[tuple[Path, list[str] | None]]:
     """Validate global selection once, then partition it by source."""
-    sources = list(dict.fromkeys(source.resolve() for source in sources))
-    plugin_names = [
-        json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["name"] for source in sources
-    ]
+    sources = list(dict.fromkeys(catalog.checked_source(source) for source in sources))
+    plugin_names = [catalog.source_manifest(source)["name"] for source in sources]
     if len(plugin_names) != len(set(plugin_names)):
         msg = "Ambiguous plugin installations; select one source for each plugin name."
         raise ValueError(msg)
@@ -135,3 +139,14 @@ def selections_by_source(sources: list[Path], selected: list[str] | None) -> lis
         for source, names in inventories
         if names.intersection(selected)
     ]
+
+
+def run_check(args: argparse.Namespace) -> None:
+    """Separate integrity reporting from optional native discovery."""
+    report = checks.inspect(args.output)
+    if args.native:
+        if not args.target:
+            msg = "Native checking requires --target."
+            raise ValueError(msg)
+        report["native"] = native.check(args.output, args.target, args.executable, allow_auth=args.allow_auth)
+    sys.stdout.write(json.dumps(report) + "\n")

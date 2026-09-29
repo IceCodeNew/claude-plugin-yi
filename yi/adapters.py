@@ -1,11 +1,12 @@
 """Plan target files and report unsupported plugin behavior."""
 
 import importlib
-import json
 import re
 from pathlib import Path
 
-from yi.catalog import discover
+from yi.catalog import checked_source, discover, source_manifest
+from yi.safety import reject_sensitive
+from yi.target_config import agent_files, hook_files, mcp_files
 
 SKILL_ROOTS = {
     "ampcode": ".config/amp/skills",
@@ -17,8 +18,8 @@ SKILL_ROOTS = {
 
 def preview(source: Path, target: str, selected: list[str] | None = None) -> tuple[dict, dict[str, bytes]]:
     """Build a conversion plan without changing the filesystem."""
-    source = source.resolve()
-    manifest = json.loads((source / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
+    source = checked_source(source)
+    manifest = source_manifest(source)
     plugin = manifest["name"]
     if not isinstance(plugin, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", plugin):
         msg = "Plugin name must use lowercase letters, digits, and hyphens."
@@ -67,8 +68,13 @@ def preview(source: Path, target: str, selected: list[str] | None = None) -> tup
         owners.update(dict.fromkeys(resources, item["name"]))
         executables.extend(executable_resources)
         components.append({**item, "status": "unverified", "reason": "Files prepared; validate target skill behavior."})
-    if not selected:
-        components.extend(plugin_blockers(source, manifest))
+    if not selected and not manifest.get("standalone"):
+        components.extend(plugin_blockers(manifest))
+        for kind, converter in (("mcp", mcp_files), ("agents", agent_files), ("hooks", hook_files)):
+            outputs, diagnostics = converter(source, manifest, target)
+            files.update(outputs)
+            owners.update(dict.fromkeys(outputs, f"{plugin}:{kind}"))
+            components.extend(diagnostics)
     return {
         "plugin": plugin,
         "selection": selected,
@@ -150,19 +156,9 @@ def convert_skill(path: Path, name: str) -> bytes | None:
     return ("---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body).encode()
 
 
-def plugin_blockers(source: Path, manifest: dict) -> list[dict]:
+def plugin_blockers(manifest: dict) -> list[dict]:
     """Report unsupported whole-plugin capabilities without omission."""
     components = []
-    extra_components = (("hooks", "hooks/hooks.json"), ("agents", "agents"), ("mcp", ".mcp.json"))
-    for kind, location in extra_components:
-        if (source / location).exists() or kind in manifest or (kind == "mcp" and "mcpServers" in manifest):
-            components.append(
-                {
-                    "kind": kind,
-                    "status": "blocked",
-                    "reason": "Use the target harness to adapt and verify this component.",
-                }
-            )
     known = {
         "name",
         "version",
@@ -193,12 +189,3 @@ def read_yaml(text: str) -> object:
         msg = "Migration requires PyYAML. Run the helper with uv run --with pyyaml."
         raise ValueError(msg) from error
     return parser.safe_load(text)
-
-
-def reject_sensitive(path: Path, content: bytes) -> None:
-    """Reject known credential resources before creating exportable bytes."""
-    names = {"credentials.json", "auth.json", "auth.jsonc", ".netrc", ".pypirc", "id_rsa", "id_ed25519"}
-    secret_header = re.search(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----", content)
-    if path.name.lower() in names or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"} or secret_header:
-        msg = f"Sensitive resource requires removal or explicit redaction: {path.name}"
-        raise ValueError(msg)
