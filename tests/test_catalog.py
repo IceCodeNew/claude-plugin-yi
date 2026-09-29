@@ -198,3 +198,17 @@ def test_user_catalog_reports_corrupt_plugin_without_losing_valid_items(tmp_path
     result = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")
     assert any(item["name"] == "good" for item in result["items"])
     assert any(item["name"] == "broken" and item["status"] == "unresolved" for item in result["items"])
+
+
+def test_user_invalid_standalone_source_does_not_hide_good_resources(tmp_path) -> None:
+    # Given a linked standalone command and a valid command in the same catalog.
+    root = tmp_path / "claude"
+    (root / "commands").mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("Outside.", encoding="utf-8")
+    (root / "commands/bad.md").symlink_to(outside)
+    (root / "commands/good.md").write_text("Good.", encoding="utf-8")
+    # When listed, retain the good source and report the bad one as unresolved.
+    items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
+    assert any(item["name"] == "good" for item in items)
+    assert any(item["name"] == "bad" and item["status"] == "unresolved" for item in items)

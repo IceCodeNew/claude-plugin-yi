@@ -92,7 +92,22 @@ def standalone_items(root: Path) -> list[dict[str, str]]:
     """Discover user or project resources independent of installed plugins."""
     sources = [path.parent for path in sorted((root / "skills").glob("*/SKILL.md"))]
     sources.extend(sorted((root / "commands").rglob("*.md")))
-    return [item for source in sources for item in discover(source)]
+    items = []
+    for source in sources:
+        try:
+            items.extend(discover(source))
+        except (ValueError, OSError) as error:
+            items.append(
+                {
+                    "name": source.name if source.is_dir() else source.stem,
+                    "kind": "skill" if source.is_dir() else "command",
+                    "source": str(source),
+                    "path": str(source),
+                    "status": "unresolved",
+                    "reason": str(error),
+                }
+            )
+    return items
 
 
 def checked_source(source: Path) -> Path:
