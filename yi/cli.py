@@ -66,6 +66,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     """Run the requested local operation."""
     args = parse_args()
+    try:
+        return dispatch(args)
+    except (ValueError, OSError) as error:
+        report = {
+            "status": "failed",
+            "stage": "preview" if args.command == "migrate" else args.command,
+            "error": str(error),
+        }
+        sys.stdout.write(json.dumps(report) + "\n")
+        return 1
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    """Run one operation after argument parsing."""
     if args.command == "record":
         return collect(args)
     if args.command == "migrate":
@@ -174,14 +188,14 @@ def run_check(args: argparse.Namespace) -> None:
     """Separate integrity reporting from optional native discovery."""
     from yi import checks  # noqa: PLC0415 - Integrity checks are opt-in.
 
+    if args.native and not args.target:
+        msg = "Native checking requires --target."
+        raise ValueError(msg)
     if args.accept_changes:
         checks.accept_changes(args.output)
     report = checks.inspect(args.output)
     if args.native:
         from yi import native  # noqa: PLC0415 - Native process/network dependencies are explicit.
 
-        if not args.target:
-            msg = "Native checking requires --target."
-            raise ValueError(msg)
         report["native"] = native.check(args.output, args.target, args.executable, allow_auth=args.allow_auth)
     sys.stdout.write(json.dumps(report) + "\n")

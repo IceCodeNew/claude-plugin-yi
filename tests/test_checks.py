@@ -182,3 +182,29 @@ def test_user_can_accept_reviewed_artifact_changes_without_claiming_behavior(tmp
     result = run_cli(tmp_path, "check", "--output", str(root), "--accept-changes", "--json")
     assert result["intact"] is True
     assert result["runtime_verified"] is False
+
+
+def test_user_invalid_native_options_do_not_accept_changed_files(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given an edited artifact and an incomplete native-check request.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    (root / "pi/home/a").write_bytes(b"edited")
+    manifest = root / "manifests/pi-demo.json"
+    original = json.dumps({"components": [], "hashes": {"pi/home/a": hashlib.sha256(b"old").hexdigest()}})
+    manifest.write_text(original, encoding="utf-8")
+    # When --target is missing, validation must precede accepting hashes.
+    result = subprocess.run(  # noqa: S603 - Fixed CLI and task-owned fixture.
+        [sys.executable, str(ENTRY), "check", "--output", str(root), "--native", "--accept-changes", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert manifest.read_text(encoding="utf-8") == original
+    assert "Traceback" not in result.stderr
