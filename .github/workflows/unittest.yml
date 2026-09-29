@@ -124,5 +124,5 @@ jobs:
         uv sync --frozen
         uv run ruff check .
         uv run ruff format --check .
-        uv tool run --from prek==0.5.3 prek run --all-files
+        SKIP=no-commit-to-branch uv tool run --from prek==0.5.3 prek run --all-files
         git diff --exit-code
