@@ -472,3 +472,18 @@ def test_user_unaccepted_execution_mode_change_is_not_overwritten(tmp_path) -> N
     with pytest.raises(ValueError, match="modified"):
         apply(root, report, {"pi/home/run.sh": b"exit 0\n"})
     assert (root / "pi/home/run.sh").stat().st_mode & 0o777 == 0o600
+
+
+def test_user_can_retry_after_fresh_output_validation_failure(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+
+    # Given a fresh root and an invalid generated path.
+    root = tmp_path / "output"
+    report = {"plugin": "demo", "target": "pi", "components": [], "owners": {}}
+    with pytest.raises(ValueError, match="escapes"):
+        apply(root, report, {"../outside": b"invalid"})
+    # When the plan is corrected, initialized ownership must permit retry.
+    assert apply(root, report, {"pi/home/notes.txt": b"valid"})
+    assert (root / "pi/home/notes.txt").read_bytes() == b"valid"

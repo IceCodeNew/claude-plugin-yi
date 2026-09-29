@@ -92,6 +92,7 @@ def prepare_repository(root: Path) -> bool:
     fresh = not (root / ".git").exists()
     if fresh:
         git(root, "init", "--initial-branch=main")
+        (root / ".yi-artifacts.json").write_text('{"owner":"yi","schema":1}\n', encoding="utf-8")
     elif not (root / ".yi-artifacts.json").is_file():
         msg = "Existing repository is not owned by yi."
         raise ValueError(msg)
