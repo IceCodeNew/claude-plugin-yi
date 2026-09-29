@@ -208,3 +208,38 @@ def test_user_invalid_native_options_do_not_accept_changed_files(tmp_path) -> No
     assert result.returncode != 0
     assert manifest.read_text(encoding="utf-8") == original
     assert "Traceback" not in result.stderr
+
+
+def test_user_native_resources_allow_platform_ancestor_alias(tmp_path) -> None:
+    from yi.native import copy_discovery_resources
+
+    # Given a target HOME beneath an ancestor alias.
+    actual = tmp_path / "actual"
+    skill = actual / "home/.pi/agent/skills/check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("Check.", encoding="utf-8")
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    # When isolated discovery copies resources, aliases outside the HOME are allowed.
+    destination = tmp_path / "probe"
+    copy_discovery_resources(alias / "home", destination, "pi")
+    assert (destination / ".pi/agent/skills/check/SKILL.md").read_text(encoding="utf-8") == "Check."
+
+
+def test_user_native_password_rejects_incomplete_startup_line(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    import pytest
+
+    from yi.native_opencode import server_password
+
+    # Given a real process that exits before terminating its password line.
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.write('server password incomplete')"],
+        stdout=subprocess.PIPE,
+    ) as process:
+        # When startup ends, a partial password must not be used for authentication.
+        with pytest.raises(ValueError, match="startup"):
+            server_password(process)
+        process.wait(timeout=5)

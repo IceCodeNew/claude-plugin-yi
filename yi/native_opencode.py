@@ -74,7 +74,8 @@ def server_password(process: subprocess.Popen) -> str:
             if not chunk:
                 break
             pending += chunk
-            for line in pending.splitlines():
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
                 if line.startswith(b"server password "):
                     return line.removeprefix(b"server password ").decode().strip()
     msg = "OpenCode did not complete authenticated startup."

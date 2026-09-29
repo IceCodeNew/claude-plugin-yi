@@ -75,7 +75,7 @@ def copy_discovery_resources(source: Path, destination: Path, target: str) -> No
     roots.extend([source / ".pi/agent/prompts", source / ".config/opencode/commands"])
     for path in (path for folder in roots for path in folder.rglob("*.md")):
         relative = path.relative_to(source)
-        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        if path.is_symlink() or any(parent.is_symlink() for parent in path.parents if parent.is_relative_to(source)):
             msg = "Native discovery rejects symlink resources."
             raise ValueError(msg)
         if not {"skills", "prompts", "commands"}.intersection(relative.parts):
