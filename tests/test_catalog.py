@@ -302,3 +302,23 @@ def test_user_missing_explicit_component_path_is_not_optional(tmp_path, kind) ->
     # When planning, retain prior artifacts by failing before an empty replacement plan is applied.
     with pytest.raises(ValueError, match="missing"):
         preview(source, "codex")
+
+
+def test_user_malformed_install_entries_do_not_hide_valid_sources(tmp_path) -> None:
+    # Given invalid rows beside a valid indexed plugin.
+    root = tmp_path / "claude"
+    source = tmp_path / "valid"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"good"}', encoding="utf-8")
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text("Check.", encoding="utf-8")
+    (root / "plugins").mkdir(parents=True)
+    entries = {
+        "bad@local": [None, {}, {"installPath": False}, {"installPath": ""}],
+        "good@local": [{"installPath": str(source)}],
+    }
+    (root / "plugins/installed_plugins.json").write_text(json.dumps({"plugins": entries}), encoding="utf-8")
+    # When discovered, retain valid resources and expose each malformed row as unresolved.
+    items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
+    assert any(item["name"] == "good:check" for item in items)
+    assert len([item for item in items if item.get("status") == "unresolved"]) == 4

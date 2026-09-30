@@ -69,8 +69,21 @@ def installed(root: Path) -> list[dict[str, str]]:
     seen = set()
     plugins = require_object(require_object(data, "Installation registry").get("plugins"), "Registry plugins")
     for index_name, entries in plugins.items():
-        for entry in entries:
-            source = Path(entry["installPath"])
+        rows = entries if isinstance(entries, list) else [entries]
+        for entry in rows:
+            source = installation_path(entry)
+            if source is None:
+                items.append(
+                    {
+                        "name": index_name.split("@", 1)[0],
+                        "kind": "plugin",
+                        "source": "",
+                        "path": "",
+                        "status": "unresolved",
+                        "reason": "Registry entry requires a nonempty installPath string.",
+                    }
+                )
+                continue
             if source in seen:
                 continue
             seen.add(source)
@@ -180,14 +193,23 @@ def registered_manifest(source: Path, claude_root: Path | None) -> dict:
         return source_manifest(source)
     index = json.loads((claude_root / "plugins/installed_plugins.json").read_text(encoding="utf-8"))
     plugins = require_object(require_object(index, "Installation registry").get("plugins"), "Registry plugins")
-    matches = [
-        name
-        for name, entries in plugins.items()
-        if any(Path(entry["installPath"]).resolve() == source.resolve() for entry in entries)
-    ]
+    matches = []
+    for name, entries in plugins.items():
+        rows = entries if isinstance(entries, list) else [entries]
+        paths = [path for entry in rows if (path := installation_path(entry)) is not None]
+        if any(path.resolve() == source.resolve() for path in paths):
+            matches.append(name)
     if not matches:
         return source_manifest(source)
     if len(matches) != 1:
         msg = "Source has ambiguous marketplace registrations."
         raise ValueError(msg)
     return marketplace_manifest(claude_root, matches[0])
+
+
+def installation_path(entry: object) -> Path | None:
+    """Parse one installation registry row without hiding valid neighbors."""
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("installPath")
+    return Path(value) if isinstance(value, str) and value.strip() else None
