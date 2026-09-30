@@ -37,6 +37,9 @@ def parse_args() -> argparse.Namespace:
     migration.add_argument("--item", action="append", help="Select a complete component ID; repeat for multiple items.")
     migration.add_argument("--claude-dir", type=Path, help="Resolve installed marketplace-owned manifests.")
     migration.add_argument("--output", type=Path)
+    migration.add_argument(
+        "--native-package", action="store_true", help="Stage an upstream native package without activation."
+    )
     migration.add_argument("--dry-run", action="store_true")
     migration.add_argument("--json", action="store_true")
     settings = commands.add_parser("config", help="Read or set the private artifact-root configuration.")
@@ -125,13 +128,18 @@ def dispatch(args: argparse.Namespace) -> int:
 
 def run_migration(args: argparse.Namespace) -> int:
     """Prepare all selected units before changing artifact files."""
-    from yi import adapters, artifacts, catalog  # noqa: PLC0415 - Isolate migration startup from hooks.
+    from yi import adapters, artifacts, catalog, native_package  # noqa: PLC0415 - Isolate migration startup from hooks.
 
     settings = config.configure(args.data_dir)
     output = args.output or Path(settings["output_root"])
     selections = selections_by_source(args.source, args.item, args.claude_dir)
+    if args.native_package and args.item:
+        msg = "Native package staging requires a whole source package, not --item selections."
+        raise ValueError(msg)
     plans = [
-        adapters.preview(
+        native_package.preview(source, target)
+        if args.native_package
+        else adapters.preview(
             source,
             target,
             selected,

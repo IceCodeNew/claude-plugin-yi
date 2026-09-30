@@ -89,6 +89,8 @@ def test_user_cannot_overwrite_committed_manual_artifact_edits(tmp_path) -> None
     (root / "manifests/codex-demo.json").write_text(
         json.dumps(
             {
+                "plugin": "demo",
+                "target": "codex",
                 "hashes": {"codex/home/check.txt": hashlib.sha256(b"generated").hexdigest()},
             }
         ),

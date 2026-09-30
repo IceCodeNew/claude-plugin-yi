@@ -21,7 +21,9 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
         if path.is_symlink():
             msg = "Shared manifest must not be a symlink."
             raise ValueError(msg)
-        manifests[path] = json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if document.get("activation") != "not-registered":
+            manifests[path] = document
     contributions = {name: content.decode() for name, content in files.items() if name in SHARED}
     prior = next(
         (

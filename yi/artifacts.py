@@ -30,7 +30,8 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
     """Generate one source-target unit without staging or committing user files."""
     root = root.expanduser().absolute()
     fresh = prepare_repository(root)
-    manifest_path = f"manifests/{report['target']}-{report['plugin']}.json"
+    variant = "--native" if report.get("activation") == "not-registered" else ""
+    manifest_path = f"manifests/{report['target']}-{report['plugin']}{variant}.json"
     validate_paths(root, [manifest_path])
     previous = root / manifest_path
     prior = json.loads(previous.read_text(encoding="utf-8")) if previous.exists() else {}
@@ -38,9 +39,18 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
         prior["reviewed_files"] = sorted(
             set(prior.get("reviewed_files", [])) | (set(prior.get("hashes", {})) - shared_config.SHARED)
         )
+    if prior and (
+        prior.get("plugin") != report["plugin"]
+        or prior.get("target") != report["target"]
+        or prior.get("activation") != report.get("activation")
+    ):
+        msg = "Artifact manifest identity conflicts with this source or export mode."
+        raise ValueError(msg)
     owned = prior.get("hashes", {})
     verify_owned(root, owned, set(prior.get("executables", [])))
-    files, shared_metadata = shared_config.prepare(root, report, files)
+    files, shared_metadata = (
+        (files, {}) if report.get("activation") == "not-registered" else shared_config.prepare(root, report, files)
+    )
     validate_new_files(root, {name: value for name, value in files.items() if name not in shared_config.SHARED}, owned)
     prior = {
         **prior,
@@ -158,6 +168,7 @@ def merge_manifest(prior: dict, report: dict, files: dict[str, bytes]) -> dict:
     components = [item for item in prior.get("components", []) if selected and item.get("name") not in selected]
     components.extend(report.get("components", []))
     return {
+        "activation": report.get("activation"),
         "plugin": report["plugin"],
         "target": report["target"],
         "hashes": hashes,
