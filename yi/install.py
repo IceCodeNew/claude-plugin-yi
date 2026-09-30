@@ -26,7 +26,9 @@ def install(root: Path, target: str, destination: Path, *, apply: bool, accept_u
             validate_paths(destination, [str(local)])
             validate_paths(root, [relative])
             content = source.read_bytes()
-            if hashlib.sha256(content).hexdigest() != expected:
+            if hashlib.sha256(content).hexdigest() != expected or bool(source.stat().st_mode & 0o111) != (
+                relative in data.get("executables", [])
+            ):
                 msg = f"Artifact changed since generation: {relative}"
                 raise ValueError(msg)
             if output.exists() and output.read_bytes() != content:

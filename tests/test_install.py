@@ -54,6 +54,7 @@ def test_user_installs_scripts_with_executable_mode(tmp_path) -> None:
     script = root / "pi/home/run.sh"
     script.parent.mkdir(parents=True)
     script.write_bytes(b"#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
     (root / "manifests/pi-demo.json").write_text(
         json.dumps(
             {
@@ -139,6 +140,7 @@ def test_user_gets_mode_conflict_instead_of_silent_broken_executable(tmp_path) -
     (root / "pi/home").mkdir(parents=True)
     content = b"#!/bin/sh\nexit 0\n"
     (root / "pi/home/run.sh").write_bytes(content)
+    (root / "pi/home/run.sh").chmod(0o755)
     (root / "manifests/pi-demo.json").write_text(
         json.dumps(
             {
@@ -186,3 +188,24 @@ def test_user_rejects_manifest_path_escape_before_installation(tmp_path) -> None
     with pytest.raises(ValueError, match="escapes"):
         install(root, "pi", destination, apply=True, accept_unverified=True)
     assert outside.read_bytes() == b"private fixture"
+
+
+def test_user_install_rejects_unaccepted_artifact_execution_mode(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+    from yi.install import install
+
+    # Given a generated executable whose source artifact execution bits were removed.
+    root = tmp_path / "output"
+    path = "pi/home/run.sh"
+    apply(
+        root,
+        {"plugin": "demo", "target": "pi", "components": [], "owners": {path: "demo:run"}, "executables": [path]},
+        {path: b"exit 0\n"},
+    )
+    (root / path).chmod(0o600)
+    # When installing, refuse stale mode metadata rather than restoring permission from the manifest.
+    with pytest.raises(ValueError, match="changed"):
+        install(root, "pi", tmp_path / "destination", apply=True, accept_unverified=True)
+    assert not (tmp_path / "destination").exists()

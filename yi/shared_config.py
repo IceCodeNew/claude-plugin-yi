@@ -5,6 +5,8 @@ import json
 import tomllib
 from pathlib import Path
 
+from yi.safety import require_object
+
 SHARED = {
     "opencode-v2/home/.config/opencode/opencode.json",
     "codex/home/.codex/config.toml",
@@ -21,7 +23,7 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
         if path.is_symlink():
             msg = "Shared manifest must not be a symlink."
             raise ValueError(msg)
-        document = json.loads(path.read_text(encoding="utf-8"))
+        document = require_object(json.loads(path.read_text(encoding="utf-8")), "Shared manifest")
         if document.get("activation") != "not-registered":
             manifests[path] = document
     contributions = {name: content.decode() for name, content in files.items() if name in SHARED}
@@ -48,7 +50,11 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
         owners = [data for data in participants if name in data.get("hashes", {})]
         if existing.exists():
             digest = hashlib.sha256(existing.read_bytes()).hexdigest()
-            if not owners or any(data["hashes"][name] != digest for data in owners):
+            if not owners or any(
+                data["hashes"][name] != digest
+                or bool(existing.stat().st_mode & 0o111) != (name in data.get("executables", []))
+                for data in owners
+            ):
                 msg = f"Shared configuration is unowned or modified: {name}"
                 raise ValueError(msg)
         pieces = [
