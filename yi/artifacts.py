@@ -63,6 +63,7 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
     }
     if fresh:
         outputs[".yi-artifacts.json"] = b'{"owner":"yi","schema":1}\n'
+    if not (root / ".gitignore").exists():
         outputs[".gitignore"] = b"**/.cache/\n**/auth.json\n**/auth.jsonc\n**/credentials.json\n**/.env\n**/*.log\n"
     validate_paths(root, list(outputs))
     changed = bool(removed)

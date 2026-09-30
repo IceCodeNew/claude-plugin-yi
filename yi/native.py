@@ -26,7 +26,7 @@ def check(root: Path, target: str, executable: str | None, *, allow_auth: bool =
             "reason": "Amp may query account metadata with existing credentials; pass --allow-auth explicitly.",
         }
     source_home = root / target / "home"
-    expected = sorted(path.parent.name for path in (source_home / SKILL_ROOTS[target]).rglob("SKILL.md"))
+    expected = sorted(path.parent.name for path in (source_home / SKILL_ROOTS[target]).glob("*/SKILL.md"))
     prompt_root = {"pi": ".pi/agent/prompts", "opencode-v2": ".config/opencode/commands"}.get(target)
     if prompt_root:
         expected.extend(path.stem for path in (source_home / prompt_root).rglob("*.md"))

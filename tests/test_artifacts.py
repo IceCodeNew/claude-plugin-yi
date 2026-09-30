@@ -487,3 +487,18 @@ def test_user_can_retry_after_fresh_output_validation_failure(tmp_path) -> None:
     # When the plan is corrected, initialized ownership must permit retry.
     assert apply(root, report, {"pi/home/notes.txt": b"valid"})
     assert (root / "pi/home/notes.txt").read_bytes() == b"valid"
+
+
+def test_user_retry_initialization_restores_missing_ignore_rules(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+
+    # Given a fresh generation that fails path validation after repository initialization.
+    root = tmp_path / "output"
+    report = {"plugin": "demo", "target": "pi", "components": [], "owners": {}}
+    with pytest.raises(ValueError, match="escapes"):
+        apply(root, report, {"../outside": b"invalid"})
+    # When retried with valid files, default exclusions must still be generated.
+    apply(root, report, {"pi/home/notes.txt": b"valid"})
+    assert "**/.env" in (root / ".gitignore").read_text(encoding="utf-8")

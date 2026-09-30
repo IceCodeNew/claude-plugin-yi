@@ -324,3 +324,24 @@ def test_user_malformed_native_response_stays_unverified(tmp_path) -> None:
     # When probing, malformed remote data is a failed verification, not an uncaught exception.
     result = check(tmp_path, "pi", str(executable))
     assert result["status"] == "unverified"
+
+
+def test_user_native_discovery_ignores_nested_skill_document_names(tmp_path) -> None:
+    import os
+
+    import pytest
+
+    from yi.native import check
+
+    executable = os.environ.get("YI_TEST_PI")
+    if not executable:
+        pytest.skip("Set YI_TEST_PI for native resource discovery.")
+    # Given a real skill with a bundled example SKILL.md, not a second registered skill.
+    skill = tmp_path / "pi/home/.pi/agent/skills/check"
+    (skill / "examples").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nCheck.\n", encoding="utf-8")
+    (skill / "examples/SKILL.md").write_text("Example document, not a registered skill.\n", encoding="utf-8")
+    # When checked, nested documentation must not create a false missing skill.
+    result = check(tmp_path, "pi", executable)
+    assert result["missing"] == []
+    assert result["status"] == "discovered"
