@@ -5,6 +5,8 @@ import json
 import re
 from pathlib import Path
 
+from yi.safety import require_object
+
 
 def discover(source: Path, manifest: dict | None = None) -> list[dict[str, str]]:
     """List conventional plugin skills and legacy commands."""
@@ -63,7 +65,8 @@ def installed(root: Path) -> list[dict[str, str]]:
     data = json.loads(index.read_text(encoding="utf-8")) if index.exists() else {"plugins": {}}
     items = standalone_items(root)
     seen = set()
-    for index_name, entries in data["plugins"].items():
+    plugins = require_object(require_object(data, "Installation registry").get("plugins"), "Registry plugins")
+    for index_name, entries in plugins.items():
         for entry in entries:
             source = Path(entry["installPath"])
             if source in seen:
@@ -176,9 +179,10 @@ def registered_manifest(source: Path, claude_root: Path | None) -> dict:
     if (source / ".claude-plugin/plugin.json").is_file() or claude_root is None:
         return source_manifest(source)
     index = json.loads((claude_root / "plugins/installed_plugins.json").read_text(encoding="utf-8"))
+    plugins = require_object(require_object(index, "Installation registry").get("plugins"), "Registry plugins")
     matches = [
         name
-        for name, entries in index["plugins"].items()
+        for name, entries in plugins.items()
         if any(Path(entry["installPath"]).resolve() == source.resolve() for entry in entries)
     ]
     if not matches:

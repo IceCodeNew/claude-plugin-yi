@@ -11,3 +11,11 @@ def reject_sensitive(path: Path, content: bytes) -> None:
     if path.name.lower() in names or path.suffix.lower() in {".pem", ".key", ".p12", ".pfx"} or secret_header:
         msg = f"Sensitive resource requires removal or explicit redaction: {path.name}"
         raise ValueError(msg)
+
+
+def require_object(value: object, label: str) -> dict:
+    """Reject malformed external object containers before lookup."""
+    if not isinstance(value, dict):
+        msg = f"{label} must be an object."
+        raise TypeError(msg)
+    return value

@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from yi import shared_config
+from yi.safety import require_object
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -34,7 +35,11 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
     manifest_path = f"manifests/{report['target']}-{report['plugin']}{variant}.json"
     validate_paths(root, [manifest_path])
     previous = root / manifest_path
-    prior = json.loads(previous.read_text(encoding="utf-8")) if previous.exists() else {}
+    prior = (
+        require_object(json.loads(previous.read_text(encoding="utf-8")), "Artifact manifest")
+        if previous.exists()
+        else {}
+    )
     if prior.get("reviewed_changes"):
         prior["reviewed_files"] = sorted(
             set(prior.get("reviewed_files", [])) | (set(prior.get("hashes", {})) - shared_config.SHARED)

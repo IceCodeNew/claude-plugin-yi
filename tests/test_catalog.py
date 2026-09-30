@@ -268,3 +268,24 @@ def test_user_malformed_marketplace_entry_does_not_abort_catalog(tmp_path) -> No
     # When read, the invalid source becomes unresolved rather than hiding the entire catalog.
     items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
     assert items[0]["status"] == "unresolved"
+
+
+def test_user_invalid_installation_registry_returns_structured_failure(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given a registry whose plugin collection is not an object.
+    root = tmp_path / "claude"
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text('{"plugins":[]}', encoding="utf-8")
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated invalid registry.
+        [sys.executable, str(ENTRY), "catalog", "--claude-dir", str(root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "failed"
+    assert "Traceback" not in result.stderr

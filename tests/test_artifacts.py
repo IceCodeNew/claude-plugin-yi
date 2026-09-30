@@ -504,3 +504,93 @@ def test_user_retry_initialization_restores_missing_ignore_rules(tmp_path) -> No
     # When retried with valid files, default exclusions must still be generated.
     apply(root, report, {"pi/home/notes.txt": b"valid"})
     assert "**/.env" in (root / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_user_shared_configuration_preserves_unaccepted_execution_mode(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+
+    # Given a generated shared file whose execution mode is edited manually.
+    root = tmp_path / "output"
+    path = "codex/home/.codex/config.toml"
+    report = {"plugin": "demo", "target": "codex", "components": [], "owners": {path: "demo:mcp"}}
+    content = b'[mcp_servers.demo]\ncommand="fixture"\nenabled=false\n'
+    apply(root, report, {path: content})
+    (root / path).chmod(0o755)
+    # When regenerated, content equality must not permit undoing an execution-mode edit.
+    with pytest.raises(ValueError, match="modified"):
+        apply(root, report, {path: content})
+    assert (root / path).stat().st_mode & 0o111
+
+
+def test_user_invalid_manifest_container_reports_failed_unit_without_traceback(tmp_path) -> None:
+    # Given an artifact manifest changed to a valid JSON scalar.
+    from yi.artifacts import apply
+
+    root = tmp_path / "output"
+    apply(root, {"plugin": "sample", "target": "pi", "components": [], "owners": {}}, {})
+    (root / "manifests/pi-sample.json").write_text("null", encoding="utf-8")
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    # When generation encounters invalid metadata, return a per-unit JSON failure.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and task-owned invalid manifest.
+        [
+            sys.executable,
+            str(ENTRY),
+            "migrate",
+            "--source",
+            str(source),
+            "--target",
+            "pi",
+            "--output",
+            str(root),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "failed"
+    assert "Traceback" not in result.stderr
+
+
+def test_user_dependency_block_order_does_not_change_regeneration(tmp_path) -> None:
+    # Given several portable skills blocked by the same incompatible sibling.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second", "third", "restricted"):
+        skill = source / "skills" / name
+        skill.mkdir(parents=True)
+        extra = "tools: Read\n" if name == "restricted" else ""
+        body = "Restricted." if name == "restricted" else "Read ../restricted/SKILL.md."
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Guide\n{extra}---\n{body}\n", encoding="utf-8"
+        )
+    output = tmp_path / "output"
+    args = [
+        sys.executable,
+        str(ENTRY),
+        "migrate",
+        "--source",
+        str(source),
+        "--target",
+        "pi",
+        "--output",
+        str(output),
+        "--json",
+    ]
+    # When fresh processes use different hash seeds, the unchanged manifest must remain unchanged.
+    results = []
+    for seed in ("1", "3"):
+        result = subprocess.run(  # noqa: S603 - Fixed CLI and isolated fixture.
+            args, env={**os.environ, "PYTHONHASHSEED": seed}, capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        results.append(json.loads(result.stdout))
+    assert results[0]["changed"] is True
+    assert results[1]["changed"] is False
+    assert results[0]["components"] == results[1]["components"]
