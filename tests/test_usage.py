@@ -163,3 +163,24 @@ def test_user_corrupt_database_returns_structured_query_failure(tmp_path) -> Non
     assert result.returncode != 0
     assert json.loads(result.stdout)["status"] == "failed"
     assert "Traceback" not in result.stderr
+
+
+def test_user_unsupported_python_does_not_block_collection(tmp_path) -> None:
+    import os
+
+    import pytest
+
+    executable = os.environ.get("YI_TEST_PYTHON310")
+    if not executable:
+        pytest.skip("Set YI_TEST_PYTHON310 to test the real unsupported interpreter.")
+    # Given Python 3.10, failure must occur before imports of Python 3.11-only modules.
+    args = [executable, str(ENTRY), "--data-dir", str(tmp_path / "data")]
+    # When invoked as a hook, continue without collecting; an ordinary command must fail.
+    hook = subprocess.run([*args, "record", "--hook"], input="{}", capture_output=True, text=True, check=False)  # noqa: S603 - Actual pinned interpreter and fixed helper.
+    command = subprocess.run([*args, "usage", "--json"], capture_output=True, text=True, check=False)  # noqa: S603 - Actual pinned interpreter and fixed helper.
+    assert hook.returncode == 0
+    assert command.returncode != 0
+    assert "Python 3.11" in hook.stderr
+    assert "Python 3.11" in command.stderr
+    assert "Traceback" not in hook.stderr + command.stderr
+    assert not (tmp_path / "data").exists()

@@ -9,7 +9,7 @@ def yaml_parser() -> ModuleType:
     try:
         parser = importlib.import_module("yaml")
     except ModuleNotFoundError as error:
-        msg = "Migration requires PyYAML. Run the helper with uv run --with pyyaml."
+        msg = "Migration requires PyYAML. Run the helper with uv run --no-project --with 'pyyaml>=6,<7' python."
         raise ValueError(msg) from error
     return parser
 

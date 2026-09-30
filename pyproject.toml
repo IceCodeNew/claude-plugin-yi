@@ -38,6 +38,10 @@ url = "https://pypi.flatt.tech/simple/"
 line-length = 120
 target-version = "py311"
 
+[tool.ruff.per-file-target-version]
+# The checkout launcher must report unsupported interpreters before importing yi.
+"scripts/yi.py" = "py310"
+
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [

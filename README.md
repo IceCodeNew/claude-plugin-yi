@@ -11,7 +11,7 @@ The counter includes manual and automatic invocations. Migration reports identif
 
 ## Local use
 
-Load this checkout with Claude Code:
+The plugin runtime requires Python 3.11 or later. Load this checkout with Claude Code:
 
 ```sh
 claude --plugin-dir /absolute/path/to/claude-plugin-yi
