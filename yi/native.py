@@ -55,7 +55,7 @@ def check(root: Path, target: str, executable: str | None, *, allow_auth: bool =
                 found = native_opencode.resources(resolved, work, environment, expected)
             else:
                 found = amp_resources(resolved, work, environment)
-        except (OSError, subprocess.SubprocessError, ValueError):
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
             return {"status": "unverified", "target": target, "reason": "Native discovery failed or timed out."}
     missing = sorted(set(expected) - set(found))
     return {

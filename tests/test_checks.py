@@ -306,3 +306,21 @@ def test_user_native_probe_retains_codex_skill_policy(tmp_path) -> None:
     assert (destination / ".agents/skills/check/agents/openai.yaml").read_text(encoding="utf-8") == (
         "policy:\n  allow_implicit_invocation: false\n"
     )
+
+
+def test_user_malformed_native_response_stays_unverified(tmp_path) -> None:
+    from yi.native import check
+
+    # Given a protocol fixture that returns a successful envelope with no command data.
+    executable = tmp_path / "fixture-pi"
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport sys,json\n"
+        "if '--version' in sys.argv: print('fixture')\n"
+        "else: print(json.dumps({'id':'commands','success':True,'data':None}))\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    (tmp_path / "pi/home").mkdir(parents=True)
+    # When probing, malformed remote data is a failed verification, not an uncaught exception.
+    result = check(tmp_path, "pi", str(executable))
+    assert result["status"] == "unverified"
