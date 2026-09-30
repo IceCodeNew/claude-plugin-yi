@@ -190,8 +190,8 @@ def hook_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, byt
     if isinstance(declared, dict):
         document = declared
     elif path.exists():
-        if path.is_symlink() or not path.resolve().is_relative_to(source):
-            msg = "Hook configuration must remain inside the plugin."
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(source):
+            msg = "Hook configuration must be a regular file inside the plugin."
             raise ValueError(msg)
         document = json.loads(path.read_text(encoding="utf-8"))
     else:

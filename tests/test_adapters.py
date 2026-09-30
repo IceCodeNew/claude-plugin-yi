@@ -1091,3 +1091,28 @@ def test_user_missing_yaml_dependency_returns_migration_guidance(tmp_path) -> No
     assert report["status"] == "failed"
     assert "PyYAML" in report["error"]
     assert "Traceback" not in result.stderr
+
+
+def test_user_hook_configuration_fifo_is_rejected_before_read(tmp_path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given a normal plugin whose hook configuration is a FIFO.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    os.mkfifo(source / "hooks/hooks.json")
+    # When previewed, reject the resource before a blocking read.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated FIFO input.
+        [sys.executable, str(ENTRY), "migrate", "--source", str(source), "--target", "codex", "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=3,
+    )
+    assert result.returncode != 0
+    assert "regular" in json.loads(result.stdout)["error"]
