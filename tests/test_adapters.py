@@ -1006,3 +1006,25 @@ def test_user_nested_skill_resource_keeps_its_local_reference(tmp_path) -> None:
     # When exported, preserve the nested document's valid local link.
     _report, files = preview(source, "pi")
     assert files["pi/home/.pi/agent/skills/sample-first/references/SKILL.md"] == b"Read ../second/SKILL.md.\n"
+
+
+def test_user_missing_manifest_name_returns_structured_failure(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given a manifest with no required source identity.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text("{}", encoding="utf-8")
+    # When previewed, an invalid lookup cannot escape as a traceback.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated invalid input.
+        [sys.executable, str(ENTRY), "migrate", "--source", str(source), "--target", "pi", "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "failed"
+    assert "Traceback" not in result.stderr
