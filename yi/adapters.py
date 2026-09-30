@@ -10,6 +10,8 @@ from yi.safety import reject_sensitive
 from yi.target_config import agent_files, hook_files, mcp_files
 from yi.targets import SKILL_ROOTS
 
+MAX_SKILL_NAME_LENGTH = 64
+
 
 def preview(
     source: Path,
@@ -63,7 +65,7 @@ def preview(
                 {
                     **item,
                     "status": "blocked",
-                    "reason": "Skill metadata or plugin-root references require target adaptation.",
+                    "reason": "Skill name, metadata, or plugin-root references require target adaptation.",
                 }
             )
             continue
@@ -155,7 +157,7 @@ def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes] | Non
         name, content = amp_command(plugin, path.stem, metadata, body)
         return {name: content}
     if target == "codex":
-        return codex_command(plugin, path.stem, metadata, body)
+        return codex_command(plugin, path.stem, metadata, body) if valid_skill_name(f"{plugin}-{path.stem}") else None
     destination = Path(target) / "home" / roots[target] / f"{plugin}-{path.stem}.md"
     return {str(destination): text.encode()}
 
@@ -188,7 +190,7 @@ def convert_skill(path: Path, name: str, target: str = "pi") -> bytes | None:
     content = path.read_bytes()
     reject_sensitive(path, content)
     text = content.decode("utf-8")
-    if "CLAUDE_PLUGIN_ROOT" in text or "!`" in text or not text.startswith("---\n"):
+    if not valid_skill_name(name) or "CLAUDE_PLUGIN_ROOT" in text or "!`" in text or not text.startswith("---\n"):
         return None
     header, separator, body = text[4:].partition("\n---\n")
     if not separator:
@@ -409,3 +411,8 @@ def retained_resources(files: dict, owners: dict, executables: list, components:
         and not (item["kind"] == "runtime-dependency" and item.get("path") not in active)
     ]
     return owners, executables, components
+
+
+def valid_skill_name(name: str) -> bool:
+    """Accept relocatable target skill identifiers without truncating collisions."""
+    return len(name) <= MAX_SKILL_NAME_LENGTH and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) is not None

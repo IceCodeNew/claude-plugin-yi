@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
 from yi.safety import require_object
@@ -55,6 +54,9 @@ def component_roots(source: Path, folder: str, declared: str | list[str]) -> lis
         if not path.resolve().is_relative_to(source):
             msg = f"Declared component path escapes plugin: {relative}"
             raise ValueError(msg)
+        if not path.exists():
+            msg = f"Explicit component path is missing: {relative}"
+            raise ValueError(msg)
         roots.append(path)
     return roots
 
@@ -85,10 +87,8 @@ def source_manifest(source: Path) -> dict:
     if not skill.is_file() or skill.suffix != ".md":
         msg = f"Source is not a plugin, skill directory, or Markdown command: {source}"
         raise ValueError(msg)
-    name = skill.parent.name if skill.name == "SKILL.md" else skill.stem
-    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "item"
     digest = hashlib.sha256(str(source.resolve()).encode()).hexdigest()[:10]
-    return {"name": f"standalone-{slug}-{digest}", "standalone": True}
+    return {"name": f"standalone-{digest}", "standalone": True}
 
 
 def standalone_items(root: Path) -> list[dict[str, str]]:

@@ -14,10 +14,10 @@ def import_history(directory: Path, source: Path) -> dict[str, int]:
     paths = sorted(source.rglob("*.jsonl")) if source.is_dir() else [source]
     with closing(connect(directory)) as connection:
         for path in paths:
-            with path.open(encoding="utf-8") as stream:
+            with path.open("rb") as stream:
                 for line in stream:
                     try:
-                        event = event_from_row(json.loads(line))
+                        event = event_from_row(json.loads(line.decode("utf-8")))
                         if event is None:
                             counts["ignored"] += 1
                         else:

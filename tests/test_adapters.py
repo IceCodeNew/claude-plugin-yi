@@ -1212,3 +1212,20 @@ def test_user_removed_dependency_skill_has_no_stale_resource_diagnostic(tmp_path
     assert not files
     assert not any(item["kind"] == "runtime-dependency" for item in report["components"])
     assert any(item["name"] == "sample:first" and item["kind"] == "skill-dependency" for item in report["components"])
+
+
+def test_user_invalid_generated_skill_name_blocks_only_that_skill(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a valid source skill whose plugin prefix would exceed native name limits.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(json.dumps({"name": "p" * 50}), encoding="utf-8")
+    skill = source / "skills" / ("s" * 20)
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: source\ndescription: Guide\n---\nGuide.\n", encoding="utf-8")
+    # When converted, do not emit a skill that target discovery rejects.
+    report, files = preview(source, "pi")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
+    assert "name" in report["components"][0]["reason"].lower()

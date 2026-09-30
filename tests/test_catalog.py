@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from tests.test_usage import run_cli
 
 
@@ -59,8 +61,6 @@ def test_user_discovers_installed_plugin_index(tmp_path) -> None:
 
 
 def test_user_cannot_select_ambiguous_component_names(tmp_path) -> None:
-    import pytest
-
     from yi.catalog import discover
 
     # Given a skill and command sharing one qualified name.
@@ -112,8 +112,6 @@ def test_user_discovers_standalone_skills_and_commands_without_plugin_index(tmp_
 
 
 def test_user_rejects_linked_standalone_source(tmp_path) -> None:
-    import pytest
-
     from yi.catalog import discover
 
     # Given a standalone command linked to a file outside its advertised source.
@@ -289,3 +287,18 @@ def test_user_invalid_installation_registry_returns_structured_failure(tmp_path)
     assert result.returncode != 0
     assert json.loads(result.stdout)["status"] == "failed"
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("kind", ["skills", "commands", "agents"])
+def test_user_missing_explicit_component_path_is_not_optional(tmp_path, kind) -> None:
+    from yi.adapters import preview
+
+    # Given a manifest whose explicit component path is absent.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        json.dumps({"name": "sample", kind: ["custom/missing"]}), encoding="utf-8"
+    )
+    # When planning, retain prior artifacts by failing before an empty replacement plan is applied.
+    with pytest.raises(ValueError, match="missing"):
+        preview(source, "codex")

@@ -71,3 +71,19 @@ def test_user_non_skill_tool_receipts_are_ignored(tmp_path) -> None:
     assert result["ignored"] == 3
     assert result["rejected"] == 0
     assert result["imported"] == 0
+
+
+def test_user_history_invalid_utf8_rejects_only_affected_row(tmp_path) -> None:
+    # Given one invalid encoded row followed by a valid successful skill receipt.
+    source = tmp_path / "history.jsonl"
+    row = {
+        "sessionId": "s",
+        "type": "user",
+        "toolUseResult": {"success": True, "commandName": "demo:check"},
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "t"}]},
+    }
+    source.write_bytes(b"\xff\n" + json.dumps(row).encode() + b"\n")
+    # When imported, later calls remain observable and the corrupt row is reported.
+    result = run_cli(tmp_path, "history", "--from", str(source), "--json")
+    assert result["imported"] == 1
+    assert result["rejected"] == 1
