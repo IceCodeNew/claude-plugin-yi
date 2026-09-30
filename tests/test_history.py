@@ -51,3 +51,23 @@ def test_user_reports_invalid_history_without_storing_conversation_text(tmp_path
     result = run_cli(tmp_path, "history", "--from", str(source), "--json")
     assert result == {"imported": 0, "duplicates": 0, "ignored": 2, "rejected": 1}
     assert run_cli(tmp_path, "usage", "--json")["items"] == []
+
+
+def test_user_non_skill_tool_receipts_are_ignored(tmp_path) -> None:
+    # Given ordinary tool results whose receipt is not a skill launch object.
+    source = tmp_path / "history.jsonl"
+    rows = [
+        {
+            "type": "user",
+            "sessionId": "s",
+            "toolUseResult": value,
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "t"}]},
+        }
+        for value in (None, "plain receipt", [])
+    ]
+    source.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    # When imported, unrelated receipts are ignored rather than rejected as malformed skill calls.
+    result = run_cli(tmp_path, "history", "--from", str(source), "--json")
+    assert result["ignored"] == 3
+    assert result["rejected"] == 0
+    assert result["imported"] == 0

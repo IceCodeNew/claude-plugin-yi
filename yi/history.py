@@ -33,6 +33,8 @@ def event_from_row(row: dict) -> dict | None:
         return None
     content = row.get("message", {}).get("content")
     receipt = row.get("toolUseResult", {})
+    if not isinstance(receipt, dict):
+        receipt = {}
     if isinstance(content, list) and receipt.get("success") is True and receipt.get("commandName"):
         results = [block for block in content if block.get("type") == "tool_result"]
         if len(results) != 1 or results[0].get("is_error"):
