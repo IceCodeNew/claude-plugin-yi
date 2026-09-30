@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ENTRY = Path(__file__).resolve().parents[1] / "scripts/yi.py"
 
 
@@ -51,8 +53,6 @@ def test_user_generates_without_staging_and_skips_unchanged_output(tmp_path) -> 
 
 def test_user_cannot_replace_an_unowned_manifest(tmp_path) -> None:
     # Given an unrelated clean repository with a file at yi's manifest path.
-    import pytest
-
     from yi.artifacts import apply, git
 
     root = tmp_path / "output"
@@ -74,8 +74,6 @@ def test_user_cannot_replace_an_unowned_manifest(tmp_path) -> None:
 def test_user_cannot_overwrite_committed_manual_artifact_edits(tmp_path) -> None:
     # Given an owned artifact whose content was manually changed and committed.
     import hashlib
-
-    import pytest
 
     from yi.artifacts import apply, git
 
@@ -138,8 +136,6 @@ def test_user_preserves_previous_component_ownership(tmp_path) -> None:
 
 
 def test_user_cannot_write_manifest_through_symlink(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply, git
 
     # Given a clean owned repository with a linked manifest directory.
@@ -356,8 +352,6 @@ def test_user_batch_failure_emits_json_and_marks_remaining_units_unattempted(tmp
 
 
 def test_user_reviewed_edits_are_not_overwritten_by_regeneration(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply, git
     from yi.checks import accept_changes
 
@@ -415,8 +409,6 @@ def test_user_skill_generation_ignores_unrelated_corrupt_target_manifest(tmp_pat
 
 
 def test_user_reviewed_executable_change_is_protected(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
     from yi.checks import accept_changes
 
@@ -437,8 +429,6 @@ def test_user_reviewed_executable_change_is_protected(tmp_path) -> None:
 
 
 def test_user_parent_file_conflict_does_not_partially_update_artifacts(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
 
     # Given a generated file and an unowned file where a future directory is needed.
@@ -453,8 +443,6 @@ def test_user_parent_file_conflict_does_not_partially_update_artifacts(tmp_path)
 
 
 def test_user_unaccepted_execution_mode_change_is_not_overwritten(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
     from yi.checks import inspect
 
@@ -477,8 +465,6 @@ def test_user_unaccepted_execution_mode_change_is_not_overwritten(tmp_path) -> N
 
 
 def test_user_can_retry_after_fresh_output_validation_failure(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
 
     # Given a fresh root and an invalid generated path.
@@ -492,8 +478,6 @@ def test_user_can_retry_after_fresh_output_validation_failure(tmp_path) -> None:
 
 
 def test_user_retry_initialization_restores_missing_ignore_rules(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
 
     # Given a fresh generation that fails path validation after repository initialization.
@@ -507,8 +491,6 @@ def test_user_retry_initialization_restores_missing_ignore_rules(tmp_path) -> No
 
 
 def test_user_shared_configuration_preserves_unaccepted_execution_mode(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
 
     # Given a generated shared file whose execution mode is edited manually.
@@ -597,8 +579,6 @@ def test_user_dependency_block_order_does_not_change_regeneration(tmp_path) -> N
 
 
 def test_user_output_plan_parent_collision_is_rejected_before_writes(tmp_path) -> None:
-    import pytest
-
     from yi.artifacts import apply
 
     # Given one plan that creates both a regular file and a child beneath that file.
@@ -609,3 +589,67 @@ def test_user_output_plan_parent_collision_is_rejected_before_writes(tmp_path) -
         apply(root, report, {"codex/home/agents": b"file", "codex/home/agents/openai.yaml": b"policy: {}"})
     assert not (root / "codex/home/agents").exists()
     assert not (root / "manifests/codex-demo.json").exists()
+
+
+@pytest.mark.parametrize("operation", ["migrate", "check", "install"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("hashes", []),
+        ("hashes", {"pi/home/a": None}),
+        ("owners", []),
+        ("executables", "pi/home/a"),
+        ("components", [None]),
+    ],
+)
+def test_user_invalid_nested_manifest_ownership_returns_json_failure(tmp_path, operation, field, value) -> None:
+    from yi.artifacts import apply
+
+    # Given valid outer metadata with an invalid nested ownership collection.
+    root = tmp_path / "output"
+    report = {"plugin": "sample", "target": "pi", "components": [], "owners": {"pi/home/a": "sample:a"}}
+    apply(root, report, {"pi/home/a": b"a"})
+    path = root / "manifests/pi-sample.json"
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+    metadata[field] = value
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    options = (
+        ["--source", str(source), "--target", "pi"]
+        if operation == "migrate"
+        else ["--target", "pi", "--destination", str(tmp_path / "destination")]
+        if operation == "install"
+        else []
+    )
+    # When any manifest consumer runs, malformed fields must fail without traceback or output writes.
+    result = subprocess.run(  # noqa: S603 - Fixed helper with isolated invalid persisted metadata.
+        [sys.executable, str(ENTRY), operation, "--output", str(root), *options, "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "failed"
+    assert "Traceback" not in result.stderr
+    assert (root / "pi/home/a").read_bytes() == b"a"
+
+
+@pytest.mark.parametrize("operation", ["check", "install"])
+def test_user_manifest_fifo_is_rejected_before_read(tmp_path, operation) -> None:
+    # Given a persisted manifest path that is a FIFO.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    os.mkfifo(root / "manifests/pi-demo.json")
+    options = ["--target", "pi", "--destination", str(tmp_path / "home")] if operation == "install" else []
+    # When read by an actual CLI process, it must fail without blocking.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated FIFO fixture.
+        [sys.executable, str(ENTRY), operation, "--output", str(root), *options, "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=3,
+    )
+    assert result.returncode != 0
+    assert "regular" in json.loads(result.stdout)["error"]

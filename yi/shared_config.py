@@ -5,6 +5,7 @@ import json
 import tomllib
 from pathlib import Path
 
+from yi.manifest import read_manifest
 from yi.safety import require_object
 
 SHARED = {
@@ -23,7 +24,7 @@ def prepare(root: Path, report: dict, files: dict[str, bytes]) -> tuple[dict[str
         if path.is_symlink():
             msg = "Shared manifest must not be a symlink."
             raise ValueError(msg)
-        document = require_object(json.loads(path.read_text(encoding="utf-8")), "Shared manifest")
+        document = read_manifest(path)
         if document.get("activation") != "not-registered":
             manifests[path] = document
     contributions = {name: content.decode() for name, content in files.items() if name in SHARED}
@@ -84,14 +85,14 @@ def combine(name: str, pieces: list[str]) -> bytes:
         return content.encode()
     result = {}
     for text in pieces:
-        document = json.loads(text)
+        document = require_object(json.loads(text), "Shared configuration")
         if "mcp" in document:
             servers = result.setdefault("mcp", {}).setdefault("servers", {})
-            if set(servers) & set(document["mcp"]["servers"]):
+            if set(servers) & set(configuration_servers(document)):
                 msg = "Shared MCP server name collision. Rename one source server."
                 raise ValueError(msg)
-            servers.update(document["mcp"]["servers"])
-        for event, handlers in document.get("hooks", {}).items():
+            servers.update(configuration_servers(document))
+        for event, handlers in require_object(document.get("hooks", {}), "Shared hook events").items():
             result.setdefault("hooks", {}).setdefault(event, []).extend(handlers)
     return (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()
 
@@ -115,3 +116,9 @@ def migrate_legacy_owners(root: Path, manifests: dict, affected: set[str]) -> di
                 data[key] = [name for name in data.get(key, []) if name not in affected]
             metadata[str(path.relative_to(root))] = encode(data)
     return metadata
+
+
+def configuration_servers(document: dict) -> dict:
+    """Validate shared server collections before combining their contributions."""
+    mcp = require_object(document["mcp"], "Shared MCP configuration")
+    return require_object(mcp["servers"], "Shared MCP servers")

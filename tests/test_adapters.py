@@ -1229,3 +1229,11 @@ def test_user_invalid_generated_skill_name_blocks_only_that_skill(tmp_path) -> N
     assert not files
     assert report["components"][0]["status"] == "blocked"
     assert "name" in report["components"][0]["reason"].lower()
+
+
+def test_user_shared_json_contribution_requires_object_container() -> None:
+    from yi.shared_config import combine
+
+    # Given persisted contribution text that is valid JSON but not a native config object.
+    with pytest.raises(TypeError, match="object"):
+        combine("opencode-v2/home/.config/opencode/opencode.json", ["[]"])

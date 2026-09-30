@@ -1,10 +1,10 @@
 """Preview and explicitly install owned files without starting services."""
 
 import hashlib
-import json
 from pathlib import Path
 
 from yi.artifacts import validate_paths
+from yi.manifest import read_manifest
 
 
 def install(root: Path, target: str, destination: Path, *, apply: bool, accept_unverified: bool) -> dict:
@@ -17,7 +17,7 @@ def install(root: Path, target: str, destination: Path, *, apply: bool, accept_u
     executable = set()
     unresolved = []
     for manifest in sorted((root / "manifests").glob(f"{target}-*.json")):
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = read_manifest(manifest)
         unresolved.extend(item for item in data["components"] if item["status"] != "converted")
         for relative, expected in data["hashes"].items():
             source = root / relative

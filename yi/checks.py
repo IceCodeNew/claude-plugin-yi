@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from yi.manifest import read_manifest
+
 
 def inspect(root: Path) -> dict:
     """Compare artifact hashes and retain unresolved component diagnostics."""
@@ -15,7 +17,7 @@ def inspect(root: Path) -> dict:
     changed = []
     components = []
     for manifest in manifests:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = read_manifest(manifest)
         components.extend(data["components"])
         for relative, expected in data["hashes"].items():
             path = root / relative
@@ -41,7 +43,7 @@ def accept_changes(root: Path) -> None:
     updates = {}
     for manifest in sorted((root / "manifests").glob("*.json")):
         validate_paths(root, [str(manifest.relative_to(root))])
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data = read_manifest(manifest)
         hashes = {}
         reviewed = set(data.get("reviewed_files", []))
         executable = []
