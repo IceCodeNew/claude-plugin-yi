@@ -985,3 +985,24 @@ def test_user_opencode_agent_inherits_model_without_literal_alias(tmp_path) -> N
     assert "model" not in metadata
     assert metadata["color"] == "#0000ff"
     assert not any(item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_nested_skill_resource_keeps_its_local_reference(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a nested document that references a local resource, not a top-level sibling.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Guide\n---\nGuide.\n", encoding="utf-8")
+    first = source / "skills/first"
+    (first / "references").mkdir()
+    (first / "second").mkdir()
+    (first / "references/SKILL.md").write_text("Read ../second/SKILL.md.\n", encoding="utf-8")
+    (first / "second/SKILL.md").write_text("Local reference.\n", encoding="utf-8")
+    # When exported, preserve the nested document's valid local link.
+    _report, files = preview(source, "pi")
+    assert files["pi/home/.pi/agent/skills/sample-first/references/SKILL.md"] == b"Read ../second/SKILL.md.\n"

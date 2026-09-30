@@ -325,8 +325,9 @@ def rewrite_skill_links(files: dict[str, bytes], inventory: list[dict], plugin: 
     """Resolve known sibling skill links against the generated inventory."""
     siblings = {Path(item["path"]).parent.name for item in inventory if item["kind"] == "skill"}
     root = Path(target) / "home" / SKILL_ROOTS[target]
+    entries = {str(root / f"{plugin}-{sibling}" / "SKILL.md") for sibling in siblings}
     for name, content in files.items():
-        if not name.endswith("/SKILL.md"):
+        if name not in entries:
             continue
         text = content.decode("utf-8")
 
