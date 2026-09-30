@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     migration.add_argument("--source", type=Path, action="append", required=True)
     migration.add_argument("--target", choices=tuple(SKILL_ROOTS), action="append", required=True)
     migration.add_argument("--item", action="append", help="Select a complete component ID; repeat for multiple items.")
+    migration.add_argument("--claude-dir", type=Path, help="Resolve installed marketplace-owned manifests.")
     migration.add_argument("--output", type=Path)
     migration.add_argument("--dry-run", action="store_true")
     migration.add_argument("--json", action="store_true")
@@ -119,12 +120,12 @@ def dispatch(args: argparse.Namespace) -> int:
 
 def run_migration(args: argparse.Namespace) -> int:
     """Prepare all selected units before changing artifact files."""
-    from yi import adapters, artifacts  # noqa: PLC0415 - Isolate migration startup from hooks.
+    from yi import adapters, artifacts, catalog  # noqa: PLC0415 - Isolate migration startup from hooks.
 
     output = args.output or Path(config.configure(args.data_dir)["output_root"])
-    selections = selections_by_source(args.source, args.item)
+    selections = selections_by_source(args.source, args.item, args.claude_dir)
     plans = [
-        adapters.preview(source, target, selected)
+        adapters.preview(source, target, selected, manifest=catalog.registered_manifest(source, args.claude_dir))
         for source, selected in selections
         for target in dict.fromkeys(args.target)
     ]
@@ -156,18 +157,23 @@ def collect(args: argparse.Namespace) -> int:
     return 0
 
 
-def selections_by_source(sources: list[Path], selected: list[str] | None) -> list[tuple[Path, list[str] | None]]:
+def selections_by_source(
+    sources: list[Path], selected: list[str] | None, claude_root: Path | None = None
+) -> list[tuple[Path, list[str] | None]]:
     """Validate global selection once, then partition it by source."""
     from yi import catalog  # noqa: PLC0415 - Source discovery belongs to migration.
 
     sources = list(dict.fromkeys(catalog.checked_source(source) for source in sources))
-    plugin_names = [catalog.source_manifest(source)["name"] for source in sources]
+    plugin_names = [catalog.registered_manifest(source, claude_root)["name"] for source in sources]
     if len(plugin_names) != len(set(plugin_names)):
         msg = "Ambiguous plugin installations; select one source for each plugin name."
         raise ValueError(msg)
     if not selected:
         return [(source, None) for source in sources]
-    inventories = [(source, {item["name"] for item in catalog.discover(source)}) for source in sources]
+    inventories = [
+        (source, {item["name"] for item in catalog.discover(source, catalog.registered_manifest(source, claude_root))})
+        for source in sources
+    ]
     for name in selected:
         if sum(name in names for _, names in inventories) > 1:
             msg = f"Ambiguous selected component: {name}. Choose one source explicitly."

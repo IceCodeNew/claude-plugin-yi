@@ -212,3 +212,59 @@ def test_user_invalid_standalone_source_does_not_hide_good_resources(tmp_path) -
     items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
     assert any(item["name"] == "good" for item in items)
     assert any(item["name"] == "bad" and item["status"] == "unresolved" for item in items)
+
+
+def test_user_resolves_marketplace_manifest_for_installed_plugin(tmp_path) -> None:
+    # Given a registered plugin whose configuration lives in its marketplace entry.
+    root = tmp_path / "claude"
+    source = tmp_path / "cached-plugin"
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text("Check.", encoding="utf-8")
+    market = tmp_path / "market"
+    (market / ".claude-plugin").mkdir(parents=True)
+    (market / ".claude-plugin/marketplace.json").write_text(
+        json.dumps(
+            {
+                "name": "local",
+                "plugins": [
+                    {
+                        "name": "sample",
+                        "source": "./plugins/sample",
+                        "strict": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text(
+        json.dumps({"plugins": {"sample@local": [{"installPath": str(source)}]}}), encoding="utf-8"
+    )
+    (root / "plugins/known_marketplaces.json").write_text(
+        json.dumps({"local": {"installLocation": str(market)}}), encoding="utf-8"
+    )
+    # When cataloged, the source identity comes from the registered marketplace rather than a guessed name.
+    items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
+    assert any(item["name"] == "sample:check" for item in items)
+    assert not any(item.get("status") == "unresolved" for item in items)
+
+
+def test_user_malformed_marketplace_entry_does_not_abort_catalog(tmp_path) -> None:
+    # Given a malformed marketplace entry beside a registered plugin.
+    root = tmp_path / "claude"
+    source = tmp_path / "cached"
+    source.mkdir()
+    market = tmp_path / "market"
+    (market / ".claude-plugin").mkdir(parents=True)
+    (market / ".claude-plugin/marketplace.json").write_text('{"plugins":[null,{"name":"sample"}]}', encoding="utf-8")
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text(
+        json.dumps({"plugins": {"sample@local": [{"installPath": str(source)}]}}), encoding="utf-8"
+    )
+    (root / "plugins/known_marketplaces.json").write_text(
+        json.dumps({"local": {"installLocation": str(market)}}), encoding="utf-8"
+    )
+    # When read, the invalid source becomes unresolved rather than hiding the entire catalog.
+    items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
+    assert items[0]["status"] == "unresolved"
