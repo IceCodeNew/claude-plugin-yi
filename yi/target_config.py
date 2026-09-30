@@ -129,7 +129,11 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
             if (
                 target not in {"codex", "opencode-v2"}
                 or not isinstance(metadata, dict)
-                or set(metadata) - {"name", "description"}
+                or set(metadata) - {"name", "description", "model", "color"}
+                or (
+                    metadata.get("model") is not None
+                    and (target != "opencode-v2" or metadata.get("model") != "inherit")
+                )
                 or not metadata.get("description")
                 or not separator
             ):
@@ -150,6 +154,9 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                 location = f".codex/agents/{name}.toml"
             else:
                 definition = {"description": metadata.get("description"), "mode": "subagent"}
+                color = agent_color(metadata.get("color"))
+                if color:
+                    definition["color"] = color
                 content = "---\n" + parser.safe_dump(definition) + "---\n" + body
                 location = f".config/opencode/agents/{name}.md"
             destination = f"{target}/home/{location}"
@@ -161,7 +168,7 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                 {
                     **item,
                     "status": "unverified",
-                    "reason": "Native agent definition prepared; verify invocation and permissions.",
+                    "reason": "Agent prepared; unsupported colors omitted. Verify model and tools.",
                 }
             )
     return files, diagnostics
@@ -326,3 +333,20 @@ def remote_server(server: dict, target: str) -> dict | None:
     if mapped_headers:
         output["env_http_headers" if target == "codex" else "headers"] = mapped_headers
     return output
+
+
+def agent_color(value: object) -> str | None:
+    """Map descriptive source palette names to explicit native hex colors."""
+    palette = {
+        "red": "#ff0000",
+        "green": "#008000",
+        "blue": "#0000ff",
+        "yellow": "#ffff00",
+        "purple": "#800080",
+        "orange": "#ffa500",
+        "cyan": "#00ffff",
+        "magenta": "#ff00ff",
+    }
+    if isinstance(value, str):
+        return value if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else palette.get(value)
+    return None

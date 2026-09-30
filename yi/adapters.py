@@ -69,6 +69,7 @@ def preview(
         files.update(resources)
         owners.update(dict.fromkeys(resources, item["name"]))
         executables.extend(executable_resources)
+        components.extend(runtime_dependencies(item, resources))
         components.append(
             {
                 **item,
@@ -341,3 +342,23 @@ def rewrite_skill_links(files: dict[str, bytes], inventory: list[dict], plugin: 
 
         text = re.sub(r"\.\./([^/\s]+)/SKILL\.md", replace, text)
         files[name] = text.encode()
+
+
+def runtime_dependencies(item: dict, resources: dict[str, bytes]) -> list[dict]:
+    """Expose recognizable host-specific executable references without executing code."""
+    dependencies = []
+    for name, content in resources.items():
+        if Path(name).suffix not in {".py", ".sh", ".js", ".mjs", ".ts"}:
+            continue
+        text = content.decode("utf-8", errors="replace")
+        if re.search(r"[\"']claude[\"']\s*,\s*[\"']-p[\"']|\bclaude\s+-p\b", text):
+            dependencies.append(
+                {
+                    "name": item["name"],
+                    "kind": "runtime-dependency",
+                    "path": name,
+                    "status": "blocked",
+                    "reason": "Bundled code invokes Claude Code. Adapt this runtime before execution.",
+                }
+            )
+    return dependencies

@@ -940,3 +940,48 @@ def test_user_sibling_link_is_rewritten_only_once(tmp_path) -> None:
     body = files["pi/home/.pi/agent/skills/sample-first/SKILL.md"]
     assert b"../sample-second/SKILL.md" in body
     assert b"../sample-sample-second/SKILL.md" not in body
+
+
+def test_user_portable_resource_with_claude_runtime_dependency_is_not_silent(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given portable instructions whose bundled evaluator still launches Claude Code.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: check\ndescription: Check\n---\nRun evaluator.py when evaluating.\n", encoding="utf-8"
+    )
+    (skill / "evaluator.py").write_text(
+        'import subprocess\nsubprocess.run(["claude", "-p", "check"])\n', encoding="utf-8"
+    )
+    # When migrated, preserve resources but expose the runtime dependency as a component blocker.
+    report, files = preview(source, "pi")
+    assert any(path.endswith("evaluator.py") for path in files)
+    assert any(item["status"] == "blocked" and "Claude" in item["reason"] for item in report["components"])
+
+
+def test_user_opencode_agent_inherits_model_without_literal_alias(tmp_path) -> None:
+    import yaml
+
+    from yi.adapters import preview
+
+    # Given an agent that explicitly inherits the active model and has descriptive color metadata.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Review\nmodel: inherit\ncolor: blue\n---\nReview the supplied text.\n",
+        encoding="utf-8",
+    )
+    # When converted, native model inheritance remains implicit and no invalid model alias is emitted.
+    report, files = preview(source, "opencode-v2")
+    assert files
+    content = next(iter(files.values())).decode()
+    metadata = yaml.safe_load(content.split("---", 2)[1])
+    assert "model" not in metadata
+    assert metadata["color"] == "#0000ff"
+    assert not any(item["status"] == "blocked" for item in report["components"])
