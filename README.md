@@ -31,6 +31,10 @@ Use the migration flow's native check to discover generated skills with the inst
 
 Migration requires PyYAML. When it is absent, run the helper through `uv run --no-project --with 'pyyaml>=6,<7' python`. The collector and usage display use Python's standard library. Development dependency resolution uses the index declared in `pyproject.toml`.
 
+## Upstream native packages
+
+Use `--native-package` to stage an existing target-native package without activation. yi preserves its relative layout outside discovery roots. Register it only after review. Do not activate both its original skills and duplicate converted skills. Preserve license notices and keep credentials outside artifacts.
+
 ## Development
 
 Use Python 3.11 or later and uv.
