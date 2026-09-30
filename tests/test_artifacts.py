@@ -653,3 +653,25 @@ def test_user_manifest_fifo_is_rejected_before_read(tmp_path, operation) -> None
     )
     assert result.returncode != 0
     assert "regular" in json.loads(result.stdout)["error"]
+
+
+def test_user_regeneration_cannot_delete_through_owned_directory_symlink(tmp_path) -> None:
+    import shutil
+
+    from yi.artifacts import apply
+
+    # Given an old owned resource replaced by a directory link to unowned user data.
+    root = tmp_path / "output"
+    relative = "pi/home/skills/demo/assets/old.txt"
+    report = {"plugin": "demo", "target": "pi", "components": [], "owners": {relative: "demo:skill"}}
+    apply(root, report, {relative: b"same bytes"})
+    owned_directory = root / "pi/home/skills/demo/assets"
+    shutil.rmtree(owned_directory)
+    backup = root / "user-backup"
+    backup.mkdir()
+    (backup / "old.txt").write_bytes(b"same bytes")
+    owned_directory.symlink_to(backup, target_is_directory=True)
+    # When regeneration removes the resource, reject the link instead of deleting the unrelated referent.
+    with pytest.raises(ValueError, match="symlink"):
+        apply(root, {**report, "owners": {}}, {})
+    assert (backup / "old.txt").read_bytes() == b"same bytes"

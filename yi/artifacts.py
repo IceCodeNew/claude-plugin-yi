@@ -76,7 +76,7 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
         outputs[".yi-artifacts.json"] = b'{"owner":"yi","schema":1}\n'
     if not (root / ".gitignore").exists():
         outputs[".gitignore"] = b"**/.cache/\n**/auth.json\n**/auth.jsonc\n**/credentials.json\n**/.env\n**/*.log\n"
-    validate_paths(root, list(outputs))
+    validate_paths(root, [*outputs, *removed])
     changed = bool(removed)
     for relative, content in outputs.items():
         destination = root / relative
@@ -113,6 +113,7 @@ def prepare_repository(root: Path) -> bool:
 
 def verify_owned(root: Path, hashes: dict[str, str], executable: set[str]) -> None:
     """Protect user edits even when those edits are already committed."""
+    validate_paths(root, list(hashes))
     for relative, expected in hashes.items():
         path = root / relative
         if not path.resolve().is_relative_to(root.resolve()):
