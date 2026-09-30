@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from yi.frontmatter import read_yaml
+from yi.frontmatter import read_yaml, yaml_parser
 from yi.safety import reject_sensitive
 
 
@@ -104,13 +104,11 @@ def agent_files(
     source: Path, manifest: dict, target: str, *, model_mapping: dict[str, str] | None = None
 ) -> tuple[dict[str, bytes], list[dict]]:
     """Convert plain agent definitions without silently changing permissions."""
-    import importlib  # noqa: PLC0415 - Keep migration dependencies out of collector startup.
-
     from yi.catalog import component_roots  # noqa: PLC0415 - Local capability dependency.
 
     files = {}
     diagnostics = []
-    parser = importlib.import_module("yaml")
+    parser = yaml_parser()
     seen = set()
     for base in component_roots(source, "agents", manifest.get("agents", [])):
         paths = [base] if base.is_file() else sorted(base.rglob("*.md"))

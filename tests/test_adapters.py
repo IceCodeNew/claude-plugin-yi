@@ -1065,3 +1065,29 @@ def test_user_invalid_agent_model_type_blocks_only_that_component(tmp_path) -> N
     report, files = preview(source, "codex", model_mapping={"opus": "fixture-model"})
     assert any(path.endswith("SKILL.md") for path in files)
     assert any(item["kind"] == "agent" and item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_missing_yaml_dependency_returns_migration_guidance(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given a plain command that reaches YAML serialization without parsing frontmatter.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text("Review this text.\n", encoding="utf-8")
+    # When Python has no site packages, emit a controlled failure with dependency setup guidance.
+    result = subprocess.run(  # noqa: S603 - Fixed interpreter and isolated source; -S excludes optional packages.
+        [sys.executable, "-S", str(ENTRY), "migrate", "--source", str(source), "--target", "pi", "--dry-run", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert report["status"] == "failed"
+    assert "PyYAML" in report["error"]
+    assert "Traceback" not in result.stderr

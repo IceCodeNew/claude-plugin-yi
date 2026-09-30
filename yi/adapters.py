@@ -1,12 +1,11 @@
 """Plan target files and report unsupported plugin behavior."""
 
-import importlib
 import json
 import re
 from pathlib import Path
 
 from yi.catalog import checked_source, discover, source_manifest
-from yi.frontmatter import read_yaml
+from yi.frontmatter import read_yaml, yaml_parser
 from yi.safety import reject_sensitive
 from yi.target_config import agent_files, hook_files, mcp_files
 from yi.targets import SKILL_ROOTS
@@ -139,7 +138,7 @@ def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes] | Non
     metadata = {
         key: value for key, value in metadata.items() if key not in {"allowed-tools", "disable-model-invocation"}
     }
-    parser = importlib.import_module("yaml")
+    parser = yaml_parser()
     text = "---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body
     without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
     if (
@@ -230,7 +229,7 @@ def convert_skill(path: Path, name: str, target: str = "pi") -> bytes | None:
         if not isinstance(descriptive, dict):
             return None
         metadata["metadata"] = {**descriptive, "source-version": str(metadata.pop("version"))}
-    parser = importlib.import_module("yaml")
+    parser = yaml_parser()
     return ("---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body).encode()
 
 
@@ -300,7 +299,7 @@ def codex_command(plugin: str, name: str, metadata: dict, body: str) -> dict[str
     """Replace removed custom prompts with explicitly invoked native skills."""
     identifier = f"{plugin}-{name}"
     destination = f"codex/home/.agents/skills/{identifier}"
-    parser = importlib.import_module("yaml")
+    parser = yaml_parser()
     header = {"name": identifier, "description": metadata.get("description", f"Run {name} explicitly.")}
     return {
         f"{destination}/SKILL.md": ("---\n" + parser.safe_dump(header) + "---\n" + body).encode(),
@@ -325,7 +324,7 @@ def skill_policy(path: Path, destination: Path, target: str) -> dict[str, bytes]
             msg = "Codex skill policy must contain a mapping."
             raise TypeError(msg)
         document = {**existing, "policy": {**policy, "allow_implicit_invocation": False}}
-        parser = importlib.import_module("yaml")
+        parser = yaml_parser()
         return {str(destination / "agents/openai.yaml"): parser.safe_dump(document, sort_keys=False).encode()}
     return {}
 
