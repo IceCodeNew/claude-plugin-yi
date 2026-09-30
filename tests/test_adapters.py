@@ -100,14 +100,14 @@ def test_user_converts_plain_commands_to_native_prompt_files(tmp_path, target) -
     assert not any(item["status"] == "blocked" for item in result["components"])
 
 
-def test_user_blocks_claude_specific_skill_frontmatter(tmp_path) -> None:
+def test_user_blocks_exclusive_skill_tool_restrictions(tmp_path) -> None:
     # Given a skill that relies on Claude permission enforcement.
     source = tmp_path / "source"
     (source / ".claude-plugin").mkdir(parents=True)
     (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
     (source / "skills/check").mkdir(parents=True)
     (source / "skills/check/SKILL.md").write_text(
-        "---\nname: check\ndescription: Check\nallowed-tools: Read\n---\nRead files.\n",
+        "---\nname: check\ndescription: Check\ntools: Read\n---\nRead files.\n",
         encoding="utf-8",
     )
     # When converted, then permissions are not silently replaced by advisory instructions.
@@ -675,3 +675,268 @@ def test_user_invalid_configuration_container_gets_json_failure(tmp_path, filena
     assert result.returncode != 0
     assert json.loads(result.stdout)["stage"] == "preview"
     assert "Traceback" not in result.stderr
+
+
+def test_user_migrates_descriptive_skill_version_without_losing_metadata(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given portable instructions with a descriptive version field.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text(
+        "---\nname: check\ndescription: Check\nversion: 1.2.3\n---\nCheck the input.\n", encoding="utf-8"
+    )
+    # When converted, descriptive version metadata must not block the whole skill.
+    report, files = preview(source, "pi")
+    assert files
+    assert not any(item["status"] == "blocked" for item in report["components"])
+    assert b"1.2.3" in next(content for path, content in files.items() if path.endswith("SKILL.md"))
+
+
+def test_user_migrates_registered_source_without_local_manifest(tmp_path) -> None:
+    # Given a cached source defined by a registered marketplace entry.
+    root = tmp_path / "claude"
+    source = tmp_path / "cached"
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text(
+        "---\nname: check\ndescription: Check\n---\nCheck.\n", encoding="utf-8"
+    )
+    market = tmp_path / "market"
+    (market / ".claude-plugin").mkdir(parents=True)
+    (market / ".claude-plugin/marketplace.json").write_text(
+        '{"plugins":[{"name":"sample","source":"./sample","strict":false}]}', encoding="utf-8"
+    )
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text(
+        json.dumps({"plugins": {"sample@local": [{"installPath": str(source)}]}}), encoding="utf-8"
+    )
+    (root / "plugins/known_marketplaces.json").write_text(
+        json.dumps({"local": {"installLocation": str(market)}}), encoding="utf-8"
+    )
+    # When explicitly resolving registry metadata, no source files need modification.
+    result = run_cli(
+        tmp_path, "migrate", "--source", str(source), "--claude-dir", str(root), "--target", "pi", "--dry-run", "--json"
+    )
+    assert result["plugin"] == "sample"
+    assert any(path.endswith("SKILL.md") for path in result["files"])
+    assert not (source / ".claude-plugin").exists()
+
+
+def test_user_migrates_preapproval_metadata_without_granting_target_permissions(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a skill with source-only tool preapproval, not an exclusive tool restriction.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text(
+        "---\nname: check\ndescription: Check\nallowed-tools: Bash(fixture *)\n---\nCheck the input.\n",
+        encoding="utf-8",
+    )
+    # When migrated, retain target permission prompts and report the lost preapproval.
+    report, files = preview(source, "pi")
+    assert files
+    assert "preapproval" in report["components"][0]["reason"]
+    assert b"allowed-tools" not in next(content for path, content in files.items() if path.endswith("SKILL.md"))
+
+
+@pytest.mark.parametrize("target", ["codex", "opencode-v2", "pi"])
+def test_user_manual_only_skill_keeps_explicit_invocation_policy(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given a skill that must not run implicitly.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text(
+        "---\nname: check\ndescription: Check\ndisable-model-invocation: true\n---\nCheck.\n", encoding="utf-8"
+    )
+    # When converted, use the target's actual manual-only field rather than losing the restriction.
+    _report, files = preview(source, target)
+    assert files
+    combined = b"\n".join(files.values())
+    field = {
+        "codex": b"allow_implicit_invocation: false",
+        "opencode-v2": b"opencode/autoinvoke: false",
+        "pi": b"disable-model-invocation: true",
+    }[target]
+    assert field in combined
+
+
+def test_user_command_preapproval_does_not_block_portable_prompt(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a reusable prompt with Claude-only tool preapproval.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text(
+        "---\ndescription: Check\nallowed-tools: Read\n---\nReview the supplied text.\n", encoding="utf-8"
+    )
+    # When converted, no target permission is granted and the prompt remains available.
+    report, files = preview(source, "pi")
+    assert files
+    assert b"allowed-tools" not in next(iter(files.values()))
+    assert "preapproval" in report["components"][0]["reason"]
+
+
+@pytest.mark.parametrize("target", ["codex", "opencode-v2"])
+def test_user_mcp_bearer_reference_stays_unresolved_in_artifacts(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given a remote MCP server that references an environment variable.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "api": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        "headers": {"Authorization": "Bearer ${SAMPLE_TOKEN}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # When converted, use the native environment reference and leave the server disabled.
+    report, files = preview(source, target)
+    assert files
+    content = b"\n".join(files.values())
+    assert b"SAMPLE_TOKEN" in content
+    assert not any(item["status"] == "blocked" for item in report["components"])
+    if target == "codex":
+        assert b'bearer_token_env_var = "SAMPLE_TOKEN"' in content
+        assert b"enabled = false" in content
+    else:
+        assert b"Bearer {env:SAMPLE_TOKEN}" in content
+        assert b'"disabled": true' in content
+
+
+def test_user_context7_attribution_query_is_preserved_without_general_secret_queries(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given the exact documented Context7 attribution URL and optional environment-backed authentication.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"context7"}', encoding="utf-8")
+    (source / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "context7": {
+                        "type": "http",
+                        "url": "https://mcp.context7.com/mcp?client=claude-code-plugin",
+                        "headers": {"Authorization": "${CONTEXT7_API_KEY:-}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # When planned, retain the fixed query and credential reference without resolving the environment.
+    _report, files = preview(source, "codex")
+    assert files
+    content = next(iter(files.values()))
+    assert b"client=claude-code-plugin" in content
+    assert b"CONTEXT7_API_KEY" in content
+
+
+def test_user_literal_email_and_shell_example_do_not_block_prompt_copy(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given ordinary prose with an email address and a non-executed shell example.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    text = "Contact dev@example.invalid. Do not use `$(git rev-parse HEAD)` in a rendered URL.\n"
+    (source / "commands/check.md").write_text(text, encoding="utf-8")
+    # When converted, literal prose must not be mistaken for attachment or template execution.
+    _report, files = preview(source, "pi")
+    assert files
+    assert text.encode() in next(iter(files.values()))
+
+
+def test_user_lsp_blocker_names_target_runtime_limit(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a valid language-server definition from marketplace metadata.
+    source = tmp_path / "source"
+    source.mkdir()
+    manifest = {
+        "name": "gopls-lsp",
+        "lspServers": {"gopls": {"command": "gopls", "extensionToLanguage": {".go": "go"}}},
+    }
+    # When the target cannot run native LSP, retain the protocol distinction and actionable boundary.
+    report, files = preview(source, "opencode-v2", manifest=manifest)
+    assert not files
+    reason = report["components"][0]["reason"]
+    assert "LSP runtime" in reason
+    assert "2.0.19" in reason
+
+
+def test_user_sibling_skill_reference_survives_namespacing(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given two skills with a relative cross-skill reference.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, body in (("first", "Read ../second/SKILL.md."), ("second", "Second guidance.")):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Guide\n---\n{body}\n", encoding="utf-8"
+        )
+    # When namespaced, the reference must resolve to the generated sibling directory.
+    _report, files = preview(source, "pi")
+    assert b"../sample-second/SKILL.md" in files["pi/home/.pi/agent/skills/sample-first/SKILL.md"]
+
+
+def test_user_codex_manual_policy_preserves_existing_sidecar(tmp_path) -> None:
+    import yaml
+
+    from yi.adapters import preview
+
+    # Given a manual-only skill with existing Codex interface metadata.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/check"
+    (skill / "agents").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: check\ndescription: Check\ndisable-model-invocation: true\n---\nCheck.\n", encoding="utf-8"
+    )
+    (skill / "agents/openai.yaml").write_text("interface:\n  display_name: Existing name\n", encoding="utf-8")
+    # When adding the manual policy, retain the existing native metadata.
+    _report, files = preview(source, "codex")
+    policy = yaml.safe_load(files["codex/home/.agents/skills/sample-check/agents/openai.yaml"])
+    assert policy["interface"]["display_name"] == "Existing name"
+    assert policy["policy"]["allow_implicit_invocation"] is False
+
+
+def test_user_sibling_link_is_rewritten_only_once(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a source name that matches another skill's generated name.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, body in (("first", "Read ../second/SKILL.md."), ("second", "Second."), ("sample-second", "Other.")):
+        (source / "skills" / name).mkdir(parents=True)
+        (source / "skills" / name / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Check\n---\n{body}\n", encoding="utf-8"
+        )
+    # When rewriting, the original link must resolve to second, never sample-second.
+    _report, files = preview(source, "pi")
+    body = files["pi/home/.pi/agent/skills/sample-first/SKILL.md"]
+    assert b"../sample-second/SKILL.md" in body
+    assert b"../sample-sample-second/SKILL.md" not in body

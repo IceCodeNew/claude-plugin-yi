@@ -1,6 +1,7 @@
 """Translate declarative target configuration without starting services."""
 
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -67,14 +68,13 @@ def convert_server(server: dict, target: str) -> dict | None:
     if (
         set(server) - {"type", "command", "args", "url", "env", "headers"}
         or server.get("env")
-        or server.get("headers")
         or ("url" in server and not safe_url(server["url"]))
     ):
         return None
     transport = server.get("type", "stdio" if "command" in server else "http")
     if transport == "stdio" and isinstance(server.get("command"), str):
         args = server.get("args", [])
-        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        if server.get("headers") or not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
             return None
         return (
             {"command": server["command"], "args": args, "enabled": False}
@@ -82,18 +82,21 @@ def convert_server(server: dict, target: str) -> dict | None:
             else {"type": "local", "command": [server["command"], *args], "disabled": True}
         )
     if transport == "http" and isinstance(server.get("url"), str) and server["url"].startswith("https://"):
-        return (
-            {"url": server["url"], "enabled": False}
-            if target == "codex"
-            else {"type": "remote", "url": server["url"], "disabled": True}
-        )
+        return remote_server(server, target)
     return None
 
 
 def toml_server(name: str, value: dict) -> str:
-    """Serialize the small supported MCP table without interpolating TOML syntax."""
-    lines = [f"[mcp_servers.{json.dumps(name, ensure_ascii=False)}]"]
-    lines.extend(f"{key} = {json.dumps(item, ensure_ascii=False)}" for key, item in value.items())
+    """Serialize the supported MCP table and environment-header mappings."""
+    table = f"mcp_servers.{json.dumps(name, ensure_ascii=False)}"
+    lines = [f"[{table}]"]
+    lines.extend(
+        f"{key} = {json.dumps(item, ensure_ascii=False)}" for key, item in value.items() if not isinstance(item, dict)
+    )
+    for key, item in value.items():
+        if isinstance(item, dict):
+            lines.append(f"[{table}.{key}]")
+            lines.extend(f"{json.dumps(header)} = {json.dumps(reference)}" for header, reference in item.items())
     return "\n".join(lines) + "\n"
 
 
@@ -246,10 +249,12 @@ def safe_url(value: object) -> bool:
     if not isinstance(value, str):
         return False
     parsed = urlsplit(value)
+    reviewed_query = value == "https://mcp.context7.com/mcp?client=claude-code-plugin"
     return (
         parsed.scheme == "https"
         and bool(parsed.hostname)
-        and not any((parsed.username, parsed.password, parsed.query, parsed.fragment))
+        and not any((parsed.username, parsed.password, parsed.fragment))
+        and (not parsed.query or reviewed_query)
     )
 
 
@@ -287,3 +292,37 @@ def configuration_object(value: object, label: str) -> dict:
         msg = f"{label} must be a JSON object."
         raise TypeError(msg)
     return value
+
+
+def remote_server(server: dict, target: str) -> dict | None:
+    """Translate only environment-backed HTTP headers without resolving values."""
+    headers = server.get("headers", {})
+    if not isinstance(headers, dict):
+        return None
+    output = (
+        {"url": server["url"], "enabled": False}
+        if target == "codex"
+        else {"type": "remote", "url": server["url"], "disabled": True}
+    )
+    if target == "opencode-v2" and headers:
+        output["oauth"] = False
+    mapped_headers = {}
+    for name, value in headers.items():
+        if not isinstance(value, str):
+            return None
+        match = re.fullmatch(r"(Bearer )?\$\{([A-Za-z_][A-Za-z0-9_]*)(:-)?\}", value)
+        if not match:
+            return None
+        prefix, variable, optional = match.groups()
+        if target == "codex":
+            if prefix:
+                if name.lower() != "authorization" or optional:
+                    return None
+                output["bearer_token_env_var"] = variable
+            else:
+                mapped_headers[name] = variable
+        else:
+            mapped_headers[name] = (prefix or "") + "{env:" + variable + "}"
+    if mapped_headers:
+        output["env_http_headers" if target == "codex" else "headers"] = mapped_headers
+    return output
