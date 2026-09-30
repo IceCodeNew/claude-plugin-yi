@@ -208,9 +208,12 @@ def convert_skill(path: Path, name: str, target: str = "pi") -> bytes | None:
         "argument-hint",
     }:
         return None
+    description = metadata.get("description")
     manual = metadata.get("disable-model-invocation", False)
     if (
-        not isinstance(manual, bool)
+        not isinstance(description, str)
+        or not description.strip()
+        or not isinstance(manual, bool)
         or (manual and target == "ampcode")
         or not isinstance(metadata.get("metadata", {}), dict)
     ):

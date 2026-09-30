@@ -1237,3 +1237,21 @@ def test_user_shared_json_contribution_requires_object_container() -> None:
     # Given persisted contribution text that is valid JSON but not a native config object.
     with pytest.raises(TypeError, match="object"):
         combine("opencode-v2/home/.config/opencode/opencode.json", ["[]"])
+
+
+@pytest.mark.parametrize("description", [None, 7, "", "   "])
+def test_user_invalid_skill_description_blocks_output(tmp_path, description) -> None:
+    from yi.adapters import preview
+
+    # Given frontmatter without a usable discovery description.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/check"
+    skill.mkdir(parents=True)
+    header = "name: check\n" if description is None else "name: check\ndescription: " + json.dumps(description) + "\n"
+    (skill / "SKILL.md").write_text("---\n" + header + "---\nCheck.\n", encoding="utf-8")
+    # When converted, do not advertise an invalid native skill as available.
+    report, files = preview(source, "pi")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
