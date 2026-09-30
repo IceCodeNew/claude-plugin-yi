@@ -594,3 +594,18 @@ def test_user_dependency_block_order_does_not_change_regeneration(tmp_path) -> N
     assert results[0]["changed"] is True
     assert results[1]["changed"] is False
     assert results[0]["components"] == results[1]["components"]
+
+
+def test_user_output_plan_parent_collision_is_rejected_before_writes(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+
+    # Given one plan that creates both a regular file and a child beneath that file.
+    root = tmp_path / "output"
+    report = {"plugin": "demo", "target": "codex", "components": [], "owners": {}}
+    # When generated, conflicting planned types must be rejected before either resource is written.
+    with pytest.raises(ValueError, match="conflict"):
+        apply(root, report, {"codex/home/agents": b"file", "codex/home/agents/openai.yaml": b"policy: {}"})
+    assert not (root / "codex/home/agents").exists()
+    assert not (root / "manifests/codex-demo.json").exists()

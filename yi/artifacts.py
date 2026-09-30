@@ -133,11 +133,15 @@ def verify_owned(root: Path, hashes: dict[str, str], executable: set[str]) -> No
 
 def validate_paths(root: Path, paths: list[str]) -> None:
     """Validate every output, including metadata, before any write."""
+    planned = {root / relative for relative in paths}
     for relative in paths:
         path = root / relative
         for parent in path.parents:
             if parent == root:
                 break
+            if parent in planned:
+                msg = f"Artifact plan has a file/directory conflict: {parent}"
+                raise ValueError(msg)
             if parent.exists() and not parent.is_dir():
                 msg = f"Artifact parent is not a directory: {parent}"
                 raise ValueError(msg)

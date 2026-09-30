@@ -162,12 +162,12 @@ def verify_declared_resources(source: Path, destination: Path, target: str, file
                 raise ValueError(msg)
 
 
-def reject_mcp_credentials(value: object) -> None:
+def reject_mcp_credentials(value: object, *, inline: bool = False) -> None:
     """Reject resolved MCP credential values while preserving environment references."""
     if not isinstance(value, dict):
         msg = "Native MCP configuration must be an object."
         raise TypeError(msg)
-    servers = value.get("mcpServers", value)
+    servers = value if inline else value.get("mcpServers", value)
     if not isinstance(servers, dict):
         msg = "Native MCP servers must be an object."
         raise TypeError(msg)
@@ -209,7 +209,7 @@ def validate_declared_mcp(source: Path) -> None:
         document = read_object(path)
         value = document.get("mcpServers")
         if isinstance(value, dict):
-            reject_mcp_credentials(value)
+            reject_mcp_credentials(value, inline=True)
         elif isinstance(value, str):
             validate_entries(source, [value])
             reject_mcp_credentials(read_object(source / value))

@@ -347,3 +347,23 @@ def test_user_declared_mcp_fifo_fails_without_blocking_preview(tmp_path) -> None
     )
     assert result.returncode != 0
     assert "regular" in json.loads(result.stdout)["error"]
+
+
+def test_user_native_inline_wrapper_named_server_cannot_export_credentials(tmp_path) -> None:
+    from yi.native_package import preview
+
+    # Given an inline server whose name matches the file-document wrapper key.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    manifest = {
+        "name": "sample",
+        "mcpServers": {
+            "mcpServers": {"command": "fixture", "headers": {"Authorization": "Bearer synthetic-private-token"}}
+        },
+    }
+    (source / ".claude-plugin/plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (source / "package.json").write_text('{"pi":{"extensions":["entry.ts"]}}', encoding="utf-8")
+    (source / "entry.ts").write_text("export default function() {}", encoding="utf-8")
+    # When staging, server names must not change credential validation semantics.
+    with pytest.raises(ValueError, match="credential"):
+        preview(source, "pi")
