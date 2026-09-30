@@ -289,3 +289,20 @@ def test_user_native_process_output_does_not_block_after_startup(tmp_path) -> No
         assert process.wait(timeout=5) == 0
         reader.join(timeout=5)
         assert not reader.is_alive()
+
+
+def test_user_native_probe_retains_codex_skill_policy(tmp_path) -> None:
+    from yi.native import copy_discovery_resources
+
+    # Given an explicit-only skill with a native policy sidecar.
+    source = tmp_path / "home"
+    skill = source / ".agents/skills/check"
+    (skill / "agents").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nCheck.\n", encoding="utf-8")
+    (skill / "agents/openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n", encoding="utf-8")
+    # When probing discovery, do not change the invocation policy by omitting its sidecar.
+    destination = tmp_path / "probe"
+    copy_discovery_resources(source, destination, "codex")
+    assert (destination / ".agents/skills/check/agents/openai.yaml").read_text(encoding="utf-8") == (
+        "policy:\n  allow_implicit_invocation: false\n"
+    )
