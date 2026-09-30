@@ -74,7 +74,7 @@ def main() -> int:
     args = parse_args()
     try:
         return dispatch(args)
-    except (ValueError, TypeError, KeyError, OSError) as error:
+    except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as error:
         report = {
             "status": "failed",
             "stage": "preview" if args.command == "migrate" else args.command,
@@ -156,7 +156,7 @@ def run_migration(args: argparse.Namespace) -> int:
         elif not args.dry_run:
             try:
                 report["changed"] = artifacts.apply(output, report, files)
-            except (ValueError, TypeError, KeyError, OSError) as error:
+            except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as error:
                 report["status"] = "failed"
                 report["error"] = str(error)
                 failed = True

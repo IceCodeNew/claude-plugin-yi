@@ -146,3 +146,20 @@ def test_user_collection_starts_when_optional_migration_module_is_unavailable(tm
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_user_corrupt_database_returns_structured_query_failure(tmp_path) -> None:
+    # Given a local usage database that is not SQLite data.
+    directory = tmp_path / "data"
+    directory.mkdir()
+    (directory / "usage.sqlite3").write_bytes(b"corrupt fixture")
+    # When queried, report a controlled failure instead of a traceback.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated corrupt database.
+        [sys.executable, str(ENTRY), "--data-dir", str(directory), "usage", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "failed"
+    assert "Traceback" not in result.stderr
