@@ -13,7 +13,12 @@ from yi.targets import SKILL_ROOTS
 
 
 def preview(
-    source: Path, target: str, selected: list[str] | None = None, *, manifest: dict | None = None
+    source: Path,
+    target: str,
+    selected: list[str] | None = None,
+    *,
+    manifest: dict | None = None,
+    model_mapping: dict[str, str] | None = None,
 ) -> tuple[dict, dict[str, bytes]]:
     """Build a conversion plan without changing the filesystem."""
     source = checked_source(source)
@@ -81,7 +86,11 @@ def preview(
     if not selected and not manifest.get("standalone"):
         components.extend(plugin_blockers(manifest, target))
         for kind, converter in (("mcp", mcp_files), ("agents", agent_files), ("hooks", hook_files)):
-            outputs, diagnostics = converter(source, manifest, target)
+            outputs, diagnostics = (
+                agent_files(source, manifest, target, model_mapping=model_mapping)
+                if kind == "agents"
+                else converter(source, manifest, target)
+            )
             files.update(outputs)
             owners.update(dict.fromkeys(outputs, f"{plugin}:{kind}"))
             components.extend(diagnostics)

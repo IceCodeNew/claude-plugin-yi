@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     migration.add_argument("--json", action="store_true")
     settings = commands.add_parser("config", help="Read or set the private artifact-root configuration.")
     settings.add_argument("--output", type=Path)
+    settings.add_argument("--target", choices=tuple(SKILL_ROOTS))
+    settings.add_argument("--model-map", action="append", help="Map a source model alias to an explicit target model.")
     settings.add_argument("--json", action="store_true")
     checker = commands.add_parser("check", help="Inspect generated artifact integrity without execution.")
     checker.add_argument("--output", type=Path, required=True)
@@ -95,7 +97,10 @@ def dispatch(args: argparse.Namespace) -> int:
     elif args.command == "check":
         run_check(args)
     elif args.command == "config":
-        sys.stdout.write(json.dumps(config.configure(args.data_dir, args.output)) + "\n")
+        sys.stdout.write(
+            json.dumps(config.configure(args.data_dir, args.output, target=args.target, model_maps=args.model_map))
+            + "\n"
+        )
     elif args.command == "catalog":
         from yi import catalog  # noqa: PLC0415 - Collection must not load source discovery.
 
@@ -122,10 +127,17 @@ def run_migration(args: argparse.Namespace) -> int:
     """Prepare all selected units before changing artifact files."""
     from yi import adapters, artifacts, catalog  # noqa: PLC0415 - Isolate migration startup from hooks.
 
-    output = args.output or Path(config.configure(args.data_dir)["output_root"])
+    settings = config.configure(args.data_dir)
+    output = args.output or Path(settings["output_root"])
     selections = selections_by_source(args.source, args.item, args.claude_dir)
     plans = [
-        adapters.preview(source, target, selected, manifest=catalog.registered_manifest(source, args.claude_dir))
+        adapters.preview(
+            source,
+            target,
+            selected,
+            manifest=catalog.registered_manifest(source, args.claude_dir),
+            model_mapping=settings.get("model_mappings", {}).get(target, {}),
+        )
         for source, selected in selections
         for target in dict.fromkeys(args.target)
     ]

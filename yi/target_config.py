@@ -100,7 +100,9 @@ def toml_server(name: str, value: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, bytes], list[dict]]:
+def agent_files(
+    source: Path, manifest: dict, target: str, *, model_mapping: dict[str, str] | None = None
+) -> tuple[dict[str, bytes], list[dict]]:
     """Convert plain agent definitions without silently changing permissions."""
     import importlib  # noqa: PLC0415 - Keep migration dependencies out of collector startup.
 
@@ -126,13 +128,16 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
             metadata = read_yaml(header) if separator else {}
             name = f"{manifest['name']}-{path.stem}"
             item = {"name": f"{manifest['name']}:agent:{path.stem}", "kind": "agent", "path": str(path)}
+            source_model = metadata.get("model") if isinstance(metadata, dict) else None
+            mapped_model = (model_mapping or {}).get(source_model) if isinstance(source_model, str) else None
             if (
                 target not in {"codex", "opencode-v2"}
                 or not isinstance(metadata, dict)
                 or set(metadata) - {"name", "description", "model", "color"}
                 or (
-                    metadata.get("model") is not None
-                    and (target != "opencode-v2" or metadata.get("model") != "inherit")
+                    source_model is not None
+                    and not mapped_model
+                    and (target != "opencode-v2" or source_model != "inherit")
                 )
                 or not metadata.get("description")
                 or not separator
@@ -147,6 +152,7 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                 continue
             if target == "codex":
                 definition = {"name": name, "description": metadata.get("description"), "developer_instructions": body}
+                definition.update({"model": mapped_model} if mapped_model else {})
                 content = (
                     "\n".join(f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in definition.items())
                     + "\n"
@@ -154,6 +160,7 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                 location = f".codex/agents/{name}.toml"
             else:
                 definition = {"description": metadata.get("description"), "mode": "subagent"}
+                definition.update({"model": mapped_model} if mapped_model else {})
                 color = agent_color(metadata.get("color"))
                 if color:
                     definition["color"] = color
@@ -169,6 +176,8 @@ def agent_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, by
                     **item,
                     "status": "unverified",
                     "reason": "Agent prepared; unsupported colors omitted. Verify model and tools.",
+                    "source_model": source_model,
+                    "target_model": mapped_model,
                 }
             )
     return files, diagnostics

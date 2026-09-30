@@ -1028,3 +1028,40 @@ def test_user_missing_manifest_name_returns_structured_failure(tmp_path) -> None
     assert result.returncode != 0
     assert json.loads(result.stdout)["status"] == "failed"
     assert "Traceback" not in result.stderr
+
+
+def test_user_explicit_model_mapping_controls_agent_conversion(tmp_path) -> None:
+    # Given a source agent whose model alias cannot be inferred by the converter.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Review\nmodel: opus\n---\nReview.\n", encoding="utf-8"
+    )
+    run_cli(tmp_path, "config", "--target", "opencode-v2", "--model-map", "opus=anthropic/claude-opus-5-5", "--json")
+    # When explicitly mapped, the report records the selected destination model and emits the agent.
+    result = run_cli(tmp_path, "migrate", "--source", str(source), "--target", "opencode-v2", "--dry-run", "--json")
+    assert any(path.endswith("sample-reviewer.md") for path in result["files"])
+    agent = next(item for item in result["components"] if item["kind"] == "agent")
+    assert agent["source_model"] == "opus"
+    assert agent["target_model"] == "anthropic/claude-opus-5-5"
+
+
+def test_user_invalid_agent_model_type_blocks_only_that_component(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given an invalid agent model list beside a valid portable skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/bad.md").write_text(
+        "---\nname: bad\ndescription: Bad\nmodel: [opus]\n---\nReview.\n", encoding="utf-8"
+    )
+    (source / "skills/good").mkdir(parents=True)
+    (source / "skills/good/SKILL.md").write_text("---\nname: good\ndescription: Good\n---\nGuide.\n", encoding="utf-8")
+    # When model mapping is available, malformed source metadata cannot abort unrelated conversion.
+    report, files = preview(source, "codex", model_mapping={"opus": "fixture-model"})
+    assert any(path.endswith("SKILL.md") for path in files)
+    assert any(item["kind"] == "agent" and item["status"] == "blocked" for item in report["components"])
