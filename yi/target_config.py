@@ -11,22 +11,19 @@ from yi.safety import reject_sensitive
 
 def mcp_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, bytes], list[dict]]:
     """Convert supported MCP transports into disabled target declarations."""
-    path = source / ".mcp.json"
     declared = manifest.get("mcpServers")
-    if isinstance(declared, str):
-        path = source / declared
-    if isinstance(declared, dict):
-        servers = declared
-    elif path.is_file():
-        if not path.resolve().is_relative_to(source) or path.is_symlink():
-            msg = "MCP configuration must remain inside the source plugin."
+    documents = declared_documents(source, declared, ".mcp.json")
+    servers = {}
+    for document in documents:
+        collection = configuration_object(
+            document if isinstance(declared, dict) else document.get("mcpServers", document), "MCP servers"
+        )
+        if set(servers) & set(collection):
+            msg = "Duplicate MCP server names in declared resources."
             raise ValueError(msg)
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data = configuration_object(data, "MCP document")
-        servers = data.get("mcpServers", data)
-    else:
+        servers.update(collection)
+    if not documents:
         return {}, []
-    servers = configuration_object(servers, "MCP servers")
     reject_sensitive(Path("mcp-config.json"), json.dumps(servers).encode())
     converted = {}
     diagnostics = []
@@ -183,21 +180,18 @@ def agent_files(
 
 def hook_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, bytes], list[dict]]:
     """Translate supported Codex hook declarations without granting trust."""
-    path = source / "hooks/hooks.json"
-    declared = manifest.get("hooks")
-    if isinstance(declared, str):
-        path = source / declared
-    if isinstance(declared, dict):
-        document = declared
-    elif path.exists():
-        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(source):
-            msg = "Hook configuration must be a regular file inside the plugin."
-            raise ValueError(msg)
-        document = json.loads(path.read_text(encoding="utf-8"))
-    else:
+    documents = declared_documents(source, manifest.get("hooks"), "hooks/hooks.json")
+    if not documents:
         return {}, []
-    document = configuration_object(document, "Hook document")
-    events = configuration_object(document.get("hooks", {}), "Hook events")
+    events = {}
+    for document in documents:
+        collection = configuration_object(document.get("hooks", {}), "Hook events")
+        for event, groups in collection.items():
+            if not isinstance(groups, list):
+                msg = "Hook event matchers must be arrays."
+                raise TypeError(msg)
+            events.setdefault(event, []).extend(groups)
+    document = {"hooks": events}
     reject_sensitive(Path("hook-config.json"), json.dumps(document).encode())
     supported = {
         "PreToolUse",
@@ -357,3 +351,31 @@ def agent_color(value: object) -> str | None:
     if isinstance(value, str):
         return value if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else palette.get(value)
     return None
+
+
+def declared_documents(source: Path, declared: object, default: str) -> list[dict]:
+    """Read all explicitly declared local configuration resources or the optional default."""
+    if isinstance(declared, dict):
+        return [declared]
+    if declared is None:
+        paths = [default] if (source / default).exists() else []
+    elif isinstance(declared, str):
+        paths = [declared]
+    elif isinstance(declared, list):
+        paths = []
+        for relative in declared:
+            if not isinstance(relative, str):
+                msg = "Configuration path arrays must contain strings."
+                raise TypeError(msg)
+            paths.append(relative)
+    else:
+        msg = "Configuration declarations must be objects, paths, or path arrays."
+        raise TypeError(msg)
+    documents = []
+    for relative in paths:
+        path = source / relative
+        if not path.resolve().is_relative_to(source) or path.is_symlink() or not path.is_file():
+            msg = f"Configuration resource is missing or not a regular file inside the plugin: {relative}"
+            raise ValueError(msg)
+        documents.append(configuration_object(json.loads(path.read_text(encoding="utf-8")), "Configuration document"))
+    return documents

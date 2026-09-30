@@ -1116,3 +1116,99 @@ def test_user_hook_configuration_fifo_is_rejected_before_read(tmp_path) -> None:
     )
     assert result.returncode != 0
     assert "regular" in json.loads(result.stdout)["error"]
+
+
+def test_user_blocked_sibling_keeps_independent_skills_in_preview(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a portable skill that depends on an incompatible sibling and another independent skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, extra, body in (
+        ("first", "", "Read ../second/SKILL.md."),
+        ("second", "tools: Read\n", "Restricted."),
+        ("independent", "", "Independent."),
+    ):
+        skill = source / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Check\n{extra}---\n{body}\n", encoding="utf-8"
+        )
+    # When the whole plugin is planned, block the dependent skill without losing independent conversion.
+    report, files = preview(source, "pi")
+    assert "pi/home/.pi/agent/skills/sample-independent/SKILL.md" in files
+    assert "pi/home/.pi/agent/skills/sample-first/SKILL.md" not in files
+    assert any(item["name"] == "sample:first" and item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_array_declarations_are_not_silently_omitted(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given explicitly declared arrays instead of conventional configuration paths.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        '{"name":"sample","mcpServers":["configs/mcp.json"],"hooks":["configs/hooks.json"]}',
+        encoding="utf-8",
+    )
+    (source / "configs").mkdir()
+    (source / "configs/mcp.json").write_text('{"mcpServers":{"docs":{"command":"fixture"}}}', encoding="utf-8")
+    (source / "configs/hooks.json").write_text(
+        '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"printf fixture"}]}]}}', encoding="utf-8"
+    )
+    # When converted, each declared resource contributes to the target plan.
+    report, files = preview(source, "codex")
+    assert "codex/home/.codex/config.toml" in files
+    assert "codex/home/.codex/hooks.json" in files
+    assert {item["kind"] for item in report["components"]} >= {"mcp", "hooks"}
+
+
+def test_user_missing_explicit_configuration_path_is_reported(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a declared resource that does not exist.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        '{"name":"sample","mcpServers":"configs/missing.json"}', encoding="utf-8"
+    )
+    # When planning, a missing explicit declaration must not disappear as an absent optional component.
+    with pytest.raises(ValueError, match="missing"):
+        preview(source, "codex")
+
+
+def test_user_inline_mcp_server_can_use_wrapper_like_name(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given an inline server collection containing a server named mcpServers.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        '{"name":"sample","mcpServers":{"mcpServers":{"command":"fixture"}}}',
+        encoding="utf-8",
+    )
+    # When converted, inline collections are not confused with file-document wrappers.
+    _report, files = preview(source, "codex")
+    assert b"sample-mcpServers" in files["codex/home/.codex/config.toml"]
+
+
+def test_user_removed_dependency_skill_has_no_stale_resource_diagnostic(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a skill with a host runtime dependency and an incompatible sibling.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, extra, body in (("first", "", "Read ../second/SKILL.md."), ("second", "tools: Read\n", "Restricted.")):
+        skill = source / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Guide\n{extra}---\n{body}\n", encoding="utf-8"
+        )
+    (source / "skills/first/run.sh").write_text('claude -p "check"\n', encoding="utf-8")
+    # When dependency closure removes first, only its dependency-block explanation remains.
+    report, files = preview(source, "pi")
+    assert not files
+    assert not any(item["kind"] == "runtime-dependency" for item in report["components"])
+    assert any(item["name"] == "sample:first" and item["kind"] == "skill-dependency" for item in report["components"])

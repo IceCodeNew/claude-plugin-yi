@@ -81,7 +81,8 @@ def preview(
                 "reason": "No source preapproval is transferred. Target permissions apply. Verify behavior.",
             }
         )
-    rewrite_skill_links(files, inventory, plugin, target)
+    components.extend(rewrite_skill_links(files, inventory, plugin, target, selected))
+    owners, executables, components = retained_resources(files, owners, executables, components)
     if not selected and not manifest.get("standalone"):
         components.extend(plugin_blockers(manifest, target))
         for kind, converter in (("mcp", mcp_files), ("agents", agent_files), ("hooks", hook_files)):
@@ -329,28 +330,50 @@ def skill_policy(path: Path, destination: Path, target: str) -> dict[str, bytes]
     return {}
 
 
-def rewrite_skill_links(files: dict[str, bytes], inventory: list[dict], plugin: str, target: str) -> None:
-    """Resolve known sibling skill links against the generated inventory."""
+def rewrite_skill_links(
+    files: dict[str, bytes], inventory: list[dict], plugin: str, target: str, selected: list[str] | None = None
+) -> list[dict]:
+    """Rewrite available sibling links and isolate blocked dependency components."""
     siblings = {Path(item["path"]).parent.name for item in inventory if item["kind"] == "skill"}
     root = Path(target) / "home" / SKILL_ROOTS[target]
-    entries = {str(root / f"{plugin}-{sibling}" / "SKILL.md") for sibling in siblings}
-    for name, content in files.items():
-        if name not in entries:
-            continue
-        text = content.decode("utf-8")
-
-        def replace(match: re.Match) -> str:
-            sibling = match.group(1)
-            if sibling not in siblings:
-                return match.group(0)
-            destination = root / f"{plugin}-{sibling}" / "SKILL.md"
-            if str(destination) not in files:
-                msg = f"Missing skill dependency: {plugin}:{sibling}. Include it in the migration."
+    entries = {str(root / f"{plugin}-{sibling}" / "SKILL.md"): sibling for sibling in sorted(siblings)}
+    dependencies = {}
+    for name in (entry for entry in entries if entry in files):
+        text = files[name].decode("utf-8")
+        dependencies[name] = set(re.findall(r"\.\./([^/\s]+)/SKILL\.md", text)) & siblings
+    diagnostics = []
+    while True:
+        unavailable = {
+            name: refs
+            for name, refs in dependencies.items()
+            if name in files and any(str(root / f"{plugin}-{ref}" / "SKILL.md") not in files for ref in refs)
+        }
+        if not unavailable:
+            break
+        for name, refs in unavailable.items():
+            missing = {ref for ref in refs if str(root / f"{plugin}-{ref}" / "SKILL.md") not in files}
+            if selected and any(f"{plugin}:{ref}" not in selected for ref in missing):
+                msg = "Missing skill dependencies: " + ", ".join(f"{plugin}:{ref}" for ref in sorted(missing))
                 raise ValueError(msg)
-            return f"../{plugin}-{sibling}/SKILL.md"
-
-        text = re.sub(r"\.\./([^/\s]+)/SKILL\.md", replace, text)
-        files[name] = text.encode()
+            diagnostics.append(
+                {
+                    "name": f"{plugin}:{entries[name]}",
+                    "kind": "skill-dependency",
+                    "status": "blocked",
+                    "reason": "Selected skill has incompatible dependencies: " + ", ".join(sorted(missing)),
+                }
+            )
+            directory = str(Path(name).parent) + "/"
+            for resource in list(files):
+                if resource.startswith(directory):
+                    del files[resource]
+    for name in (entry for entry in dependencies if entry in files):
+        files[name] = re.sub(
+            r"\.\./([^/\s]+)/SKILL\.md",
+            lambda match: f"../{plugin}-{match[1]}/SKILL.md" if match[1] in siblings else match[0],
+            files[name].decode("utf-8"),
+        ).encode()
+    return diagnostics
 
 
 def runtime_dependencies(item: dict, resources: dict[str, bytes]) -> list[dict]:
@@ -371,3 +394,18 @@ def runtime_dependencies(item: dict, resources: dict[str, bytes]) -> list[dict]:
                 }
             )
     return dependencies
+
+
+def retained_resources(files: dict, owners: dict, executables: list, components: list) -> tuple[dict, list, list]:
+    """Keep metadata aligned after dependency-blocked files are removed."""
+    active = set(files)
+    owners = {name: owner for name, owner in owners.items() if name in active}
+    executables = [name for name in executables if name in active]
+    blocked_names = {item["name"] for item in components if item.get("kind") == "skill-dependency"}
+    components = [
+        item
+        for item in components
+        if not (item["kind"] == "skill" and item["name"] in blocked_names)
+        and not (item["kind"] == "runtime-dependency" and item.get("path") not in active)
+    ]
+    return owners, executables, components
