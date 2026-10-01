@@ -37,9 +37,12 @@ def preview(source: Path, target: str) -> tuple[dict, dict[str, bytes]]:
     destination = Path(target) / "home/.local/share/yi/packages" / name
     files = {}
     executable = []
+    excluded = []
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
         if EXCLUDED.intersection(relative.parts) or path.suffix in {".pyc", ".log"}:
+            if not path.is_dir() or path.is_symlink():
+                excluded.append(str(relative))
             continue
         if path.is_symlink():
             msg = f"Native package contains a symlink: {relative}"
@@ -71,12 +74,14 @@ def preview(source: Path, target: str) -> tuple[dict, dict[str, bytes]]:
         "complete": False,
         "activation": "not-registered",
         "native_entrypoints": entrypoints,
+        "excluded_paths": excluded,
         "components": [
             {
                 "name": owner,
                 "kind": "native-package",
                 "status": "unverified",
-                "reason": "Upstream native package staged. Review and register it explicitly before execution.",
+                "reason": "Upstream native package staged. Review and register it explicitly before execution."
+                + (" Omitted local/runtime paths: " + ", ".join(excluded) if excluded else ""),
             }
         ],
     }

@@ -134,8 +134,11 @@ def test_user_native_staging_excludes_private_runtime_directories(tmp_path) -> N
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("private fixture", encoding="utf-8")
     # When staged, no runtime credentials or session history enters the artifact.
-    _report, files = preview(source, "pi")
+    report, files = preview(source, "pi")
     assert not any(".aws" in name or "/sessions/" in name for name in files)
+    assert report["excluded_paths"] == [".aws/credentials", ".pi/sessions/private.jsonl"]
+    assert ".aws/credentials" in report["components"][0]["reason"]
+    assert "private fixture" not in report["components"][0]["reason"]
 
 
 def test_user_native_codex_staging_preserves_normal_shared_configuration(tmp_path) -> None:

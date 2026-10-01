@@ -209,3 +209,43 @@ def test_user_install_rejects_unaccepted_artifact_execution_mode(tmp_path) -> No
     with pytest.raises(ValueError, match="changed"):
         install(root, "pi", tmp_path / "destination", apply=True, accept_unverified=True)
     assert not (tmp_path / "destination").exists()
+
+
+def test_user_real_install_write_failure_removes_only_new_destinations(tmp_path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from yi.artifacts import apply
+    from yi.install import install
+
+    # Given an intact artifact set with one identical existing destination and a late oversized new file.
+    root = tmp_path / "artifacts"
+    resources = {"pi/home/a-existing.txt": b"keep", "pi/home/b-new.txt": b"new", "pi/home/c-large.txt": b"x" * 8192}
+    apply(root, {"plugin": "sample", "target": "pi", "components": []}, resources)
+    destination = tmp_path / "home"
+    destination.mkdir()
+    existing = destination / "a-existing.txt"
+    existing.write_bytes(b"keep")
+    existing.chmod(0o600)
+    script = (
+        "import resource,signal,sys; from pathlib import Path; from yi.install import install; "
+        "signal.signal(signal.SIGXFSZ,signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024)); "
+        "install(Path(sys.argv[1]),'pi',Path(sys.argv[2]),apply=True,accept_unverified=True)"
+    )
+    # When a genuine kernel write fails, remove incomplete new files but preserve pre-existing bytes and permissions.
+    result = subprocess.run(  # noqa: S603 - Child-only kernel limit, fixed entrypoint, synthetic local artifact paths.
+        [sys.executable, "-c", script, str(root), str(destination)],
+        env={key: value for key, value in os.environ.items() if key != "COVERAGE_PROCESS_CONFIG"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "File too large" in result.stderr
+    assert existing.read_bytes() == b"keep"
+    assert existing.stat().st_mode & 0o777 == 0o600
+    assert not (destination / "b-new.txt").exists()
+    assert not (destination / "c-large.txt").exists()
+    # Then an unrestricted retry installs all owned files normally.
+    assert install(root, "pi", destination, apply=True, accept_unverified=True)["applied"]

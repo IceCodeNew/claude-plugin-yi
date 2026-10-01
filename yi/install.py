@@ -56,12 +56,27 @@ def require_files(files: dict[Path, bytes], target: str) -> None:
 
 def write_new_files(files: dict[Path, bytes], executable: set[Path]) -> None:
     """Create new files without changing identical existing destinations."""
-    for output, content in files.items():
-        if output.exists():
-            continue
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(content)
-        output.chmod(0o755 if output in executable else 0o644)
+    created = []
+    try:
+        for output, content in files.items():
+            if output.exists():
+                continue
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with output.open("xb") as stream:
+                created.append(output)
+                stream.write(content)
+            output.chmod(0o755 if output in executable else 0o644)
+    except OSError as error:
+        remaining = []
+        for path in reversed(created):
+            try:
+                path.unlink()
+            except OSError:
+                remaining.append(str(path))
+        if remaining:
+            msg = f"{error}. Incomplete new installation files require cleanup: {', '.join(remaining)}"
+            raise OSError(msg) from error
+        raise
 
 
 def validate_existing_modes(executable: set[Path]) -> None:

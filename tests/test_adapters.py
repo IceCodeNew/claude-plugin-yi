@@ -2128,3 +2128,26 @@ def test_user_invalid_agent_encoding_preserves_independent_agent(tmp_path, targe
     blocked = next(item for item in report["components"] if item["name"] == "sample:agent:bad")
     assert blocked["status"] == "blocked"
     assert "UTF-8" in blocked["reason"]
+
+
+@pytest.mark.parametrize("sidecar", [b"policy: [", b"\xff", b"[]\n", b"policy: []\n"])
+def test_user_malformed_codex_sidecar_blocks_only_its_manual_skill(tmp_path, sidecar) -> None:
+    from yi.adapters import preview
+
+    # Given a manual-only skill with unusable Codex policy data and an independent portable skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("manual", "portable"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        policy = "disable-model-invocation: true\n" if name == "manual" else ""
+        (path / "SKILL.md").write_text(f"---\ndescription: Guide\n{policy}---\nRead text.\n", encoding="utf-8")
+    agents = source / "skills/manual/agents"
+    agents.mkdir()
+    (agents / "openai.yaml").write_bytes(sidecar)
+    # When planned, do not lose independent output or discard the manual invocation restriction.
+    report, files = preview(source, "codex")
+    assert "codex/home/.agents/skills/sample-portable/SKILL.md" in files
+    assert set(report["owners"].values()) == {"sample:portable"}
+    assert any(item["name"] == "sample:manual" and item["status"] == "blocked" for item in report["components"])

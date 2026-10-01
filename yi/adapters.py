@@ -521,14 +521,14 @@ def skill_policy(path: Path, destination: Path, target: str, *, text: str | None
     metadata, _body = prompt_document(path, "skill", text=text)
     if metadata.get("disable-model-invocation") is True:
         sidecar = path.parent / "agents/openai.yaml"
-        existing = read_yaml(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+        existing = read_yaml(decode_prompt(sidecar.read_bytes())) if sidecar.exists() else {}
         if not isinstance(existing, dict):
             msg = "Codex skill sidecar must contain a mapping."
-            raise TypeError(msg)
+            raise PromptBlockerError(msg)
         policy = existing.get("policy", {})
         if not isinstance(policy, dict):
             msg = "Codex skill policy must contain a mapping."
-            raise TypeError(msg)
+            raise PromptBlockerError(msg)
         document = {**existing, "policy": {**policy, "allow_implicit_invocation": False}}
         parser = yaml_parser()
         return {str(destination / "agents/openai.yaml"): parser.safe_dump(document, sort_keys=False).encode()}
