@@ -118,7 +118,7 @@ def agent_files(
             seen.add(path.resolve())
             content = path.read_bytes()
             reject_sensitive(path, content)
-            text = content.decode("utf-8")
+            text = content.decode("utf-8-sig").replace("\r\n", "\n")
             header, separator, body = text.removeprefix("---\n").partition("\n---\n")
             metadata = read_yaml(header) if separator else {}
             name = f"{manifest['name']}-{path.stem}"
@@ -133,6 +133,7 @@ def agent_files(
                 )
                 continue
             source_model = metadata.get("model") if isinstance(metadata, dict) else None
+            description = metadata.get("description") if isinstance(metadata, dict) else None
             mapped_model = (model_mapping or {}).get(source_model) if isinstance(source_model, str) else None
             if (
                 target not in {"codex", "opencode-v2"}
@@ -143,7 +144,8 @@ def agent_files(
                     and not mapped_model
                     and (target != "opencode-v2" or source_model != "inherit")
                 )
-                or not metadata.get("description")
+                or not isinstance(description, str)
+                or not description.strip()
                 or not separator
             ):
                 diagnostics.append(

@@ -201,25 +201,41 @@ def protect_dependencies(root: Path, prior: dict, payload: dict, removed: set[st
     """Reject partial updates that remove a retained skill's generated sibling."""
     skill_root = Path(payload["target"]) / "home" / SKILL_ROOTS[payload["target"]]
     skill_owners = {item.get("name") for item in payload["components"] if item.get("kind") == "skill"}
+    command_dependencies = {
+        item.get("name"): item.get("dependencies", [])
+        for item in prior.get("components", [])
+        if item.get("kind") == "command-dependency"
+    }
     for name in prior.get("hashes", {}).keys() - files.keys():
         path = Path(name)
-        if path.name != "SKILL.md" or path.parent.parent != skill_root or name not in payload["hashes"]:
+        if path.suffix not in {".md", ".js"} or name not in payload["hashes"]:
             continue
         owner = prior.get("owners", {}).get(name)
         if owner != payload["owners"].get(name):
             continue
-        text = (root / path).read_text(encoding="utf-8")
-        for sibling in re.findall(r"\.\./([^/\s]+)/SKILL\.md", text):
-            dependency = str(skill_root / sibling / "SKILL.md")
-            if dependency in removed or (
-                dependency in prior.get("owners", {})
-                and (
-                    prior["owners"][dependency] != payload["owners"].get(dependency)
-                    or payload["owners"].get(dependency) not in skill_owners
-                )
-            ):
+        dependencies = retained_dependencies(root, owner, command_dependencies)
+        if path.name == "SKILL.md" and path.parent.parent == skill_root and owner in skill_owners:
+            text = (root / path).read_text(encoding="utf-8")
+            dependencies.update(
+                str(skill_root / sibling / "SKILL.md") for sibling in re.findall(r"\.\./([^/\s]+)/SKILL\.md", text)
+            )
+        for dependency in dependencies:
+            previous_owner = prior.get("owners", {}).get(dependency)
+            current_owner = payload["owners"].get(dependency)
+            same_skill = previous_owner == current_owner and current_owner in skill_owners
+            if dependency in removed or (previous_owner is not None and not same_skill):
                 msg = f"Cannot replace retained skill dependency {dependency}, used by {name}. Select all components."
                 raise ValueError(msg)
+
+
+def retained_dependencies(root: Path, owner: str | None, command_dependencies: dict) -> set[str]:
+    """Validate the explicit dependency paths for one retained component."""
+    declared = command_dependencies.get(owner, [])
+    if not isinstance(declared, list) or any(not isinstance(value, str) for value in declared):
+        msg = "Persisted command dependencies must be a list of paths. Regenerate the whole plugin."
+        raise ValueError(msg)
+    validate_paths(root, declared)
+    return {value for value in declared if isinstance(value, str)}
 
 
 def protect_reviewed(prior: dict, files: dict[str, bytes], removed: set[str], executable: set[str]) -> None:

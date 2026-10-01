@@ -191,7 +191,10 @@ def registered_manifest(source: Path, claude_root: Path | None) -> dict:
     """Resolve a source through an explicit installation registry when needed."""
     if (source / ".claude-plugin/plugin.json").is_file() or claude_root is None:
         return source_manifest(source)
-    index = json.loads((claude_root / "plugins/installed_plugins.json").read_text(encoding="utf-8"))
+    registry = claude_root / "plugins/installed_plugins.json"
+    if not registry.exists():
+        return source_manifest(source)
+    index = json.loads(registry.read_text(encoding="utf-8"))
     plugins = require_object(require_object(index, "Installation registry").get("plugins"), "Registry plugins")
     matches = []
     for name, entries in plugins.items():

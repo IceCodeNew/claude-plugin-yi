@@ -33,24 +33,12 @@ def preview(
     owners = {}
     executables = []
     components = []
-    inventory = discover(source, manifest)
+    inventory = [{**item, "source": str(source)} for item in discover(source, manifest)]
     unknown = set(selected or []) - {item["name"] for item in inventory}
     if unknown:
         msg = "Unknown selected components: " + ", ".join(sorted(unknown))
         raise ValueError(msg)
-    for item in inventory:
-        if selected and item["name"] not in selected:
-            continue
-        resources, executable_resources, diagnostics = portable_component(item, target, plugin)
-        collisions = sorted(files.keys() & resources.keys())
-        if collisions:
-            msg = f"Native output collision for {item['name']}: {', '.join(collisions)}. Select one source."
-            raise ValueError(msg)
-        files.update(resources)
-        owners.update(dict.fromkeys(resources, item["name"]))
-        executables.extend(executable_resources)
-        components.extend(diagnostics)
-    components.extend(rewrite_skill_links(files, owners, inventory, target, selected))
+    files, owners, executables, components = plan_prompts(inventory, target, selected)
     owners, executables, components = retained_resources(files, owners, executables, components)
     if not selected and not manifest.get("standalone"):
         components.extend(plugin_blockers(manifest, target))
@@ -75,26 +63,79 @@ def preview(
     }, files
 
 
+def plan_prompts(inventory: list[dict], target: str, selected: list[str] | None) -> tuple[dict, dict, list, list]:
+    """Resolve skills before command dependencies, then check actual output collisions."""
+    files, owners, executables, components = {}, {}, [], []
+    for kind in ("skill", "command"):
+        for item in inventory:
+            if item["kind"] != kind or (selected and item["name"] not in selected):
+                continue
+            resources, executable_resources, diagnostics = portable_component(
+                item, target, item["plugin"], Path(item["source"])
+            )
+            if kind == "command":
+                candidate = {**files, **resources}
+                candidate_owners = {**owners, **dict.fromkeys(resources, item["name"])}
+                diagnostics.extend(
+                    command_skill_links(
+                        candidate,
+                        candidate_owners,
+                        [
+                            {
+                                **entry,
+                                "available": owners.get(skill_entry(entry, target)) == entry["name"]
+                                and skill_entry(entry, target) in files,
+                            }
+                            for entry in inventory
+                            if entry["kind"] == "skill"
+                        ]
+                        + [item],
+                        target,
+                        selected,
+                    )
+                )
+                resources = {name: value for name, value in candidate.items() if candidate_owners[name] == item["name"]}
+            collisions = sorted(files.keys() & resources.keys())
+            if collisions:
+                msg = f"Native output collision for {item['name']}: {', '.join(collisions)}. Select one source."
+                raise ValueError(msg)
+            files.update(resources)
+            owners.update(dict.fromkeys(resources, item["name"]))
+            executables.extend(executable_resources)
+            components.extend(diagnostics)
+        if kind == "skill":
+            components.extend(rewrite_skill_links(files, owners, inventory, target, selected))
+    return files, owners, executables, components
+
+
+def skill_entry(item: dict, target: str) -> str:
+    """Locate the native entry for a catalogued source skill."""
+    return str(
+        Path(target) / "home" / SKILL_ROOTS[target] / f"{item['plugin']}-{Path(item['path']).parent.name}" / "SKILL.md"
+    )
+
+
 class PromptBlockerError(ValueError):
     """An unsupported source requirement that blocks only its component."""
 
 
-def portable_component(item: dict, target: str, plugin: str) -> tuple[dict, list, list]:
+def portable_component(item: dict, target: str, plugin: str, source: Path) -> tuple[dict, list, list]:
     """Plan one prompt and preserve independent components when it is unsupported."""
     path = Path(item["path"])
     executables = []
     try:
+        text, documents = example_documents(source, item, target)
         if item["kind"] == "command":
-            resources = command_file(path, target, plugin)
+            resources = command_file(path, target, plugin, text=text)
             reason = "Native prompt prepared without source preapproval. Verify target behavior."
             if target == "codex" and "_" in path.stem:
                 reason += f" Invoke as {plugin}-{path.stem.replace('_', '-')} in Codex."
         else:
             destination = Path(target) / "home" / SKILL_ROOTS[target] / f"{plugin}-{path.parent.name}"
-            converted = convert_skill(path, destination.name, target)
+            converted = convert_skill(path, destination.name, target, text=text)
             resources, executables = skill_files(path.parent, destination)
             resources[str(destination / "SKILL.md")] = converted
-            resources.update(skill_policy(path, destination, target))
+            resources.update(skill_policy(path, destination, target, text=text))
             reason = "No source preapproval is transferred. Target permissions apply. Verify behavior."
     except PromptBlockerError as error:
         return (
@@ -102,16 +143,78 @@ def portable_component(item: dict, target: str, plugin: str) -> tuple[dict, list
             [],
             [{**item, "status": "blocked", "reason": f"{path}: {error} Adapt this component before migration."}],
         )
+    resources.update(documents)
     diagnostics = runtime_dependencies(item, resources)
     diagnostics.append({**item, "status": "unverified", "reason": reason})
     return resources, executables, diagnostics
 
 
-def prompt_document(path: Path, kind: str) -> tuple[dict, str]:
-    """Parse prompt frontmatter and report unsupported source requirements."""
+def example_documents(source: Path, item: dict, target: str) -> tuple[str, dict[str, bytes]]:
+    """Relocate the exact inert examples directory pointer without exporting runtime code."""
+    path = Path(item["path"])
     content = path.read_bytes()
     reject_sensitive(path, content)
     text = content.decode("utf-8-sig").replace("\r\n", "\n")
+    pointer = "`${CLAUDE_PLUGIN_ROOT}/examples/`"
+    if pointer not in text:
+        return text, {}
+    folder = source / "examples"
+    if folder.is_symlink() or not folder.is_dir():
+        msg = "document-resource: examples must be a regular contained directory."
+        raise PromptBlockerError(msg)
+    native = Path(".local/share/yi/resources") / item["plugin"] / item["kind"] / path.parent.name
+    if item["kind"] == "command":
+        native = native.parent / path.stem
+    native /= "examples"
+    files = {}
+    for resource in sorted(folder.iterdir()):
+        if (
+            resource.is_symlink()
+            or not resource.is_file()
+            or resource.suffix not in {".md", ".txt"}
+            or resource.stat().st_mode & 0o111
+        ):
+            msg = f"document-resource: inert regular Markdown/text required: {resource}"
+            raise PromptBlockerError(msg)
+        if resource.name.startswith(".env"):
+            msg = f"Sensitive document resource requires review: {resource}"
+            raise ValueError(msg)
+        data = resource.read_bytes()
+        reject_sensitive(resource, data)
+        data.decode("utf-8")
+        files[str(Path(target) / "home" / native / resource.name)] = data
+    if not files:
+        msg = "document-resource: examples directory is empty."
+        raise PromptBlockerError(msg)
+    text = documentary_pointer(text, pointer, f"`~/{native}/`")
+    text += "\nResolve ~ against target HOME, not project CWD, before reading example paths. Examples stay inactive.\n"
+    return text, files
+
+
+def documentary_pointer(text: str, pointer: str, replacement: str) -> str:
+    """Rewrite exact prose references but leave executable-language fences blocked."""
+    lines = []
+    fence = None
+    documentary = False
+    for original in text.splitlines(keepends=True):
+        line = original
+        marker = re.match(r"^[ \t]*(`{3,}|~{3,})([^\n]*)", line)
+        if marker and fence is None:
+            fence = marker[1]
+            documentary = marker[2].strip().lower() in {"", "text", "markdown", "md"}
+        elif marker and fence and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+            fence = None
+        elif fence is None or documentary:
+            line = line.replace(pointer, replacement)
+        lines.append(line)
+    return "".join(lines)
+
+
+def prompt_document(path: Path, kind: str, *, text: str | None = None) -> tuple[dict, str]:
+    """Parse prompt frontmatter and report unsupported source requirements."""
+    content = path.read_bytes()
+    reject_sensitive(path, content)
+    text = (content.decode("utf-8-sig") if text is None else text).replace("\r\n", "\n")
     context_syntax(text)
     metadata = {}
     body = text
@@ -248,21 +351,23 @@ def mask_awk_line(line: str, words: list[str]) -> str:
     return line
 
 
-def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes]:
+def command_file(path: Path, target: str, plugin: str, *, text: str | None = None) -> dict[str, bytes]:
     """Translate plain Markdown commands without execution semantics."""
-    roots = {
-        "opencode-v2": ".config/opencode/commands",
-        "pi": ".pi/agent/prompts",
-        "codex": ".agents/skills",
-        "ampcode": ".config/amp/plugins",
-    }
-    metadata, body = prompt_document(path, "command")
+    metadata, body = prompt_document(path, "command", text=text)
     metadata = {
         key: value for key, value in metadata.items() if key not in {"allowed-tools", "disable-model-invocation"}
     }
     parser = yaml_parser()
     text = "---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body
     command_syntax(text, target)
+    return render_command(path, target, plugin, metadata, body)
+
+
+def render_command(path: Path, target: str, plugin: str, metadata: dict, body: str) -> dict[str, bytes]:
+    """Render a validated prompt body at the target's native entry point."""
+    roots = {"opencode-v2": ".config/opencode/commands", "pi": ".pi/agent/prompts"}
+    parser = yaml_parser()
+    text = "---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body
     if target == "ampcode":
         name, content = amp_command(plugin, path.stem, metadata, body)
         return {name: content}
@@ -299,9 +404,9 @@ def skill_files(source: Path, destination: Path) -> tuple[dict[str, bytes], list
     return files, executables
 
 
-def convert_skill(path: Path, name: str, target: str = "pi") -> bytes:
+def convert_skill(path: Path, name: str, target: str = "pi", *, text: str | None = None) -> bytes:
     """Validate and namespace portable skill content in one pass."""
-    metadata, body = prompt_document(path, "skill")
+    metadata, body = prompt_document(path, "skill", text=text)
     if not valid_skill_name(name):
         msg = f"invalid-native-identifier: {name} does not meet native skill name rules."
         raise PromptBlockerError(msg)
@@ -403,11 +508,11 @@ def codex_command(plugin: str, name: str, metadata: dict, body: str) -> dict[str
     }
 
 
-def skill_policy(path: Path, destination: Path, target: str) -> dict[str, bytes]:
+def skill_policy(path: Path, destination: Path, target: str, *, text: str | None = None) -> dict[str, bytes]:
     """Emit target sidecars for explicit-only source skills."""
     if target != "codex":
         return {}
-    metadata, _body = prompt_document(path, "skill")
+    metadata, _body = prompt_document(path, "skill", text=text)
     if metadata.get("disable-model-invocation") is True:
         sidecar = path.parent / "agents/openai.yaml"
         existing = read_yaml(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
@@ -467,9 +572,8 @@ def rewrite_skill_links(
                     "reason": "Selected skill has incompatible dependencies: " + ", ".join(sorted(missing)),
                 }
             )
-            directory = str(Path(name).parent) + "/"
             for resource in list(files):
-                if resource.startswith(directory):
+                if owners.get(resource) == owners[name]:
                     del files[resource]
     for name in (entry for entry in dependencies if entry in files):
         files[name] = re.sub(
@@ -478,6 +582,109 @@ def rewrite_skill_links(
             files[name].decode("utf-8"),
         ).encode()
     return diagnostics
+
+
+def command_skill_links(
+    files: dict[str, bytes],
+    owners: dict[str, str],
+    inventory: list[dict],
+    target: str,
+    selected: list[str] | None,
+) -> list[dict]:
+    """Resolve explicit command load directives to selected source-owned skills."""
+    skills = {item["name"]: item for item in inventory if item["kind"] == "skill"}
+    diagnostics = []
+    for item in inventory:
+        outputs = [path for path, owner in owners.items() if owner == item["name"] and path in files]
+        if item["kind"] != "command" or not outputs:
+            continue
+        text, _documents = example_documents(Path(item["source"]), item, target)
+        metadata, body = prompt_document(Path(item["path"]), "command", text=text)
+        matches = load_skill_directives(body)
+        local = [match for match in matches if match[1].split(":", 1)[0] == item["plugin"]]
+        metadata = {
+            key: value for key, value in metadata.items() if key not in {"allowed-tools", "disable-model-invocation"}
+        }
+        missing_selection = {
+            match[1] for match in local if match[1] in skills and selected and match[1] not in selected
+        }
+        if missing_selection:
+            msg = "Missing skill dependencies: " + ", ".join(sorted(missing_selection)) + ". Select them explicitly."
+            raise ValueError(msg)
+        replacements = {}
+        resolved = set()
+        unavailable = set()
+        for match in local:
+            dependency = match[1]
+            skill = skills.get(dependency)
+            native = (
+                Path(SKILL_ROOTS[target]) / f"{skill['plugin']}-{Path(skill['path']).parent.name}" / "SKILL.md"
+                if skill
+                else None
+            )
+            output = str(Path(target) / "home" / native) if native else ""
+            if not skill or not skill.get("available"):
+                unavailable.add(dependency)
+                continue
+            resolved.add(output)
+            replacements[match.start()] = (
+                match.end(),
+                f"Read and follow ~/{native}. Resolve ~ against target HOME, not project CWD, before reading",
+            )
+        if unavailable:
+            diagnostics.append(
+                {
+                    **item,
+                    "kind": "command-dependency",
+                    "status": "blocked",
+                    "reason": "Required skills unavailable: " + ", ".join(sorted(unavailable)),
+                }
+            )
+            for path in outputs:
+                files.pop(path, None)
+            continue
+        for start, (end, replacement) in sorted(replacements.items(), reverse=True):
+            body = body[:start] + replacement + body[end:]
+        if replacements:
+            files.update(render_command(Path(item["path"]), target, item["plugin"], metadata, body))
+            diagnostics.append(
+                {
+                    **item,
+                    "kind": "command-dependency",
+                    "status": "unverified",
+                    "reason": "Required native skills prepared. Verify command behavior.",
+                    "dependencies": sorted(resolved),
+                }
+            )
+    return diagnostics
+
+
+def load_skill_directives(body: str) -> list[re.Match[str]]:
+    """Find exact load directives in prose, excluding Markdown fenced examples."""
+    directive = re.compile(
+        r"(?i)^\*{0,2}(?:FIRST:[ \t]*)?Load[ \t]+(?:the[ \t]+)?"
+        r"\*{0,2}([a-z0-9-]+:[a-z0-9-]+)\*{0,2}[ \t]+skill\b(?:[ \t]+first)?\*{0,2}"
+        r"(?:[ \t]+using the Skill tool)?"
+    )
+    matches = []
+    fence = None
+    offset = 0
+    for line in body.splitlines(keepends=True):
+        marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not line[marker.end() :].strip():
+                fence = None
+        elif fence is None:
+            match = directive.match(line)
+            if match:
+                # Match offsets are measured in the complete body for safe span replacement.
+                complete = re.compile(directive.pattern, directive.flags | re.MULTILINE).match(body, offset)
+                if complete:
+                    matches.append(complete)
+        offset += len(line)
+    return matches
 
 
 def runtime_dependencies(item: dict, resources: dict[str, bytes]) -> list[dict]:
@@ -505,11 +712,15 @@ def retained_resources(files: dict, owners: dict, executables: list, components:
     active = set(files)
     owners = {name: owner for name, owner in owners.items() if name in active}
     executables = [name for name in executables if name in active]
-    blocked_names = {item["name"] for item in components if item.get("kind") == "skill-dependency"}
+    blocked_names = {
+        item["name"]
+        for item in components
+        if item.get("kind") in {"skill-dependency", "command-dependency"} and item.get("status") == "blocked"
+    }
     components = [
         item
         for item in components
-        if not (item["kind"] == "skill" and item["name"] in blocked_names)
+        if not (item["kind"] in {"skill", "command"} and item["name"] in blocked_names)
         and not (item["kind"] == "runtime-dependency" and item.get("path") not in active)
     ]
     return owners, executables, components

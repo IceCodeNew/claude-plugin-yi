@@ -733,3 +733,64 @@ def test_user_partial_regeneration_preserves_retained_skill_dependencies(tmp_pat
     with pytest.raises(ValueError, match=r"retained.*dependency"):
         apply(root, report, files)
     assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("target", ["codex", "ampcode", "opencode-v2", "pi"])
+def test_user_partial_updates_preserve_retained_command_skill_dependencies(tmp_path, target) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given a generated command with a source-owned required skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\n---\nRequired.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text("Load sample:rules skill\n", encoding="utf-8")
+    root = tmp_path / "output"
+    report, files = preview(source, target)
+    apply(root, report, files)
+    skill.write_text("---\ndescription: Rules\ntools: Read\n---\nRestricted.\n", encoding="utf-8")
+    original = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    # When updating only the required skill, refuse to leave a retained command with a broken HOME reference.
+    report, files = preview(source, target, ["sample:rules"])
+    with pytest.raises(ValueError, match=r"retained.*dependency"):
+        apply(root, report, files)
+    assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("location", ["resource", "command-fence"])
+def test_user_inert_examples_are_not_retained_command_dependency_contracts(tmp_path, location) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given an inert example mentioning a skill path, not an actual command load directive.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\n---\nRequired.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    body = (
+        "Example only:\n```text\nRead and follow ~/.agents/skills/sample-rules/SKILL.md.\n```\n"
+        if location == "command-fence"
+        else "See `${CLAUDE_PLUGIN_ROOT}/examples/`.\n"
+    )
+    (source / "commands/check.md").write_text(body, encoding="utf-8")
+    (source / "examples").mkdir()
+    (source / "examples/note.md").write_text(
+        "Example only: Read and follow ~/.agents/skills/sample-rules/SKILL.md.\n", encoding="utf-8"
+    )
+    root = tmp_path / "output"
+    report, files = preview(source, "codex")
+    apply(root, report, files)
+    skill.write_text("---\ndescription: Rules\ntools: Read\n---\nRestricted.\n", encoding="utf-8")
+    # When the unrelated skill is removed, preserve literal examples instead of treating them as runtime consumers.
+    report, files = preview(source, "codex", ["sample:rules"])
+    assert apply(root, report, files)
+    assert (root / "codex/home/.agents/skills/sample-check/SKILL.md").is_file()
+    if location == "resource":
+        assert (root / "codex/home/.local/share/yi/resources/sample/command/check/examples/note.md").is_file()

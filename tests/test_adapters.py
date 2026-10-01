@@ -335,7 +335,8 @@ def test_user_converts_disabled_mcp_for_opencode(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("target", ["codex", "opencode-v2"])
-def test_user_converts_plain_agent_to_native_definition(tmp_path, target) -> None:
+@pytest.mark.parametrize("encoding", ["lf", "crlf", "bom-crlf"])
+def test_user_converts_plain_agent_to_native_definition(tmp_path, target, encoding) -> None:
     from yi.adapters import preview
 
     # Given an agent with descriptive metadata and no special tool permissions.
@@ -343,9 +344,10 @@ def test_user_converts_plain_agent_to_native_definition(tmp_path, target) -> Non
     (source / ".claude-plugin").mkdir(parents=True)
     (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
     (source / "agents").mkdir()
-    (source / "agents/reviewer.md").write_text(
-        "---\nname: reviewer\ndescription: Review text\n---\nReview the supplied text.\n", encoding="utf-8"
-    )
+    content = "---\nname: reviewer\ndescription: Review text\n---\nReview the supplied text.\n"
+    if "crlf" in encoding:
+        content = content.replace("\n", "\r\n")
+    (source / "agents/reviewer.md").write_bytes(("\ufeff" if "bom" in encoding else "").encode() + content.encode())
     # When converted, target-native agent content is emitted and remains behavior-unverified.
     report, files = preview(source, target)
     assert any(b"Review the supplied text." in content for content in files.values())
@@ -1536,3 +1538,307 @@ def test_user_agent_runtime_root_dependency_is_not_silently_dropped(tmp_path, ta
     assert "plugin-root-reference" in blocked["reason"]
     assert not any("sample-reviewer" in path for path in files)
     assert any("sample-portable" in path for path in files)
+
+
+@pytest.mark.parametrize("target", ["ampcode", "codex", "opencode-v2", "pi"])
+def test_user_command_with_blocked_required_skill_is_not_generated(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given an explicit load directive and an incompatible required skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\ntools: Read\n---\nRequired guidance.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/configure.md").write_text(
+        "**Load sample:rules skill first** to understand rules.\n", encoding="utf-8"
+    )
+    (source / "commands/independent.md").write_text("Reply INDEPENDENT.\n", encoding="utf-8")
+    # When previewed, prune dependent command outputs while preserving independent components.
+    report, files = preview(source, target)
+    assert not any("sample-configure" in path for path in files)
+    assert any("sample-independent" in path for path in files)
+    assert any(item["name"] == "sample:configure" and item["status"] == "blocked" for item in report["components"])
+
+
+@pytest.mark.parametrize("target", ["codex", "opencode-v2", "pi"])
+@pytest.mark.parametrize("emphasis", [False, True])
+def test_user_explicit_command_dependency_requires_selected_native_skill(tmp_path, target, emphasis) -> None:
+    from yi.adapters import preview
+
+    # Given a command requiring a portable source skill and a source-specific Skill-tool directive.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\n---\nRead rules.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    command = source / "commands/configure.md"
+    directive = (
+        "Load the **sample:rules** skill using the Skill tool to understand rules.\n"
+        if emphasis
+        else "**FIRST: Load the sample:rules skill** using the Skill tool to understand rules.\n"
+    )
+    command.write_text(directive, encoding="utf-8")
+    # When the skill is unselected, request explicit selection rather than expanding scope.
+    with pytest.raises(ValueError, match=r"Missing skill dependencies.*sample:rules"):
+        preview(source, target, ["sample:configure"])
+    # When both are selected, the command points to the actual target HOME skill, not the Claude tool.
+    report, files = preview(source, target, ["sample:configure", "sample:rules"])
+    assert any(item["name"] == "sample:configure" and item["kind"] == "command" for item in report["components"])
+    content = next(
+        content
+        for path, content in files.items()
+        if report["owners"][path] == "sample:configure" and path.endswith(".md")
+    )
+    assert b"sample-rules/SKILL.md" in content
+    assert b"using the Skill tool" not in content
+    assert b"target HOME" in content
+
+
+@pytest.mark.parametrize("target", ["codex", "ampcode", "opencode-v2", "pi"])
+def test_user_plugin_document_examples_remain_inactive_target_home_resources(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given an exact documentary examples pointer and an inert rule example with enabled metadata.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/help.md").write_text("See `${CLAUDE_PLUGIN_ROOT}/examples/` for examples.\n", encoding="utf-8")
+    (source / "examples").mkdir()
+    content = b"---\nenabled: true\nevent: bash\n---\nINERT-EXAMPLE-RECEIPT\n"
+    (source / "examples/rule.local.md").write_bytes(content)
+    # When exported, retain inert bytes outside rule/skill discovery and point to destination HOME.
+    report, files = preview(source, target)
+    resource = f"{target}/home/.local/share/yi/resources/sample/command/help/examples/rule.local.md"
+    assert files[resource] == content
+    assert report["owners"][resource] == "sample:help"
+    assert not report["executables"]
+    assert not any(".claude/hookify" in path for path in files)
+    assert any(b"~/.local/share/yi/resources/sample/command/help/examples/" in content for content in files.values())
+    assert not any(b"CLAUDE_PLUGIN_ROOT" in content for content in files.values())
+
+
+@pytest.mark.parametrize("resource_kind", ["executable", "symlink", "runtime"])
+def test_user_document_example_relocation_does_not_export_unsafe_resources(tmp_path, resource_kind) -> None:
+    from yi.adapters import preview
+
+    # Given a documentary directory containing a non-inert or indirect resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/help.md").write_text("See `${CLAUDE_PLUGIN_ROOT}/examples/`.\n", encoding="utf-8")
+    (source / "examples").mkdir()
+    resource = source / "examples/note.md"
+    if resource_kind == "symlink":
+        outside = tmp_path / "private.md"
+        outside.write_text("Private fixture.", encoding="utf-8")
+        resource.symlink_to(outside)
+    elif resource_kind == "runtime":
+        (source / "examples/run.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    else:
+        resource.write_text("Executable fixture.\n", encoding="utf-8")
+        resource.chmod(0o755)
+    # When planned, block the referencing component rather than partially copy the unsafe directory.
+    report, files = preview(source, "codex")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize("target", ["codex", "ampcode", "opencode-v2", "pi"])
+def test_user_command_dependency_rewrite_preserves_document_examples(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given a real load directive plus the same text inside a fence and inert bundled example.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\n---\nRequired.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    directive = "Load sample:rules skill"
+    (source / "commands/check.md").write_text(
+        directive + "\n```text\n" + directive + "\n```\nSee `${CLAUDE_PLUGIN_ROOT}/examples/`.\n", encoding="utf-8"
+    )
+    (source / "examples").mkdir()
+    example = (directive + "\n").encode()
+    (source / "examples/note.md").write_bytes(example)
+    # When rewritten, only the real directive changes; resources and fenced instructions remain literal.
+    _report, files = preview(source, target)
+    resource = f"{target}/home/.local/share/yi/resources/sample/command/check/examples/note.md"
+    assert files[resource] == example
+    assert any(directive.encode() in content for path, content in files.items() if "sample-check" in path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```text\nLoad sample:rules skill\n```\n",
+        "````text\n```\n```\nLoad sample:rules skill\n````\n",
+        "```text\n~~~\n~~~\nLoad sample:rules skill\n```\n",
+        "Load sample:missing skill\n",
+    ],
+)
+def test_user_documentary_or_missing_command_dependencies_are_distinguished(tmp_path, body) -> None:
+    from yi.adapters import preview
+
+    # Given a known skill and either a documentary load example or an unknown local skill directive.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\n---\nRequired.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text(body, encoding="utf-8")
+    # When selected alone, examples need no closure but a missing real requirement blocks the command.
+    report, files = preview(source, "codex", ["sample:check"])
+    if body.startswith("```"):
+        assert files
+        assert any(body.encode() in content for content in files.values())
+    else:
+        assert not files
+        assert any(item["status"] == "blocked" and "sample:missing" in item["reason"] for item in report["components"])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_user_all_command_dependencies_validate_selection_before_pruning(tmp_path, reverse) -> None:
+    from yi.adapters import preview
+
+    # Given a selected blocked dependency and an unselected portable dependency in either directive order.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, extra in (("blocked", "tools: Read\n"), ("rules", "")):
+        path = source / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\ndescription: Guide\n{extra}---\nGuide.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    lines = ["Load sample:blocked skill", "Load sample:rules skill"]
+    (source / "commands/check.md").write_text("\n".join(reversed(lines) if reverse else lines) + "\n", encoding="utf-8")
+    # When selected, all missing selection requirements must be reported before incompatible pruning.
+    with pytest.raises(ValueError, match=r"Missing skill dependencies.*sample:rules"):
+        preview(source, "codex", ["sample:check", "sample:blocked"])
+
+
+def test_user_blocked_skill_dependency_removes_its_relocated_documents(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a source skill owning relocated examples but requiring an incompatible sibling.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, extra, body in (
+        ("needs", "", "Read ../rules/SKILL.md. See `${CLAUDE_PLUGIN_ROOT}/examples/`."),
+        ("rules", "tools: Read\n", "Restricted."),
+    ):
+        path = source / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\ndescription: Guide\n{extra}---\n{body}\n", encoding="utf-8")
+    (source / "examples").mkdir()
+    (source / "examples/note.md").write_text("Inert example.\n", encoding="utf-8")
+    # When closure blocks the skill, remove its entire owner set, not only its discovery directory.
+    report, files = preview(source, "pi")
+    assert not files
+    assert not report["owners"]
+    assert any(item["name"] == "sample:needs" and item["status"] == "blocked" for item in report["components"])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "```bash\ncat `${CLAUDE_PLUGIN_ROOT}/examples/`\n```\n",
+        "```python\nroot = `${CLAUDE_PLUGIN_ROOT}/examples/`\n```\n",
+    ],
+)
+def test_user_runtime_code_example_root_is_not_rewritten_as_documentary_pointer(tmp_path, content) -> None:
+    from yi.adapters import preview
+
+    # Given a source-root expression in an executable-language recipe, not a documentary link.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text(content, encoding="utf-8")
+    (source / "examples").mkdir()
+    (source / "examples/note.md").write_text("Inert.\n", encoding="utf-8")
+    # When previewed, keep runtime-root semantics blocked instead of creating a changed recipe.
+    report, files = preview(source, "codex")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
+
+
+def test_user_inert_document_directory_does_not_export_hidden_environment_files(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given an otherwise inert directory with a hidden environment resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/help.md").write_text("See `${CLAUDE_PLUGIN_ROOT}/examples/`.\n", encoding="utf-8")
+    (source / "examples").mkdir()
+    (source / "examples/.env.txt").write_text("SYNTHETIC_PRIVATE_CONFIGURATION=yes\n", encoding="utf-8")
+    # When planned, refuse the resource rather than publish private configuration as a Markdown/text example.
+    with pytest.raises(ValueError, match="Sensitive"):
+        preview(source, "codex")
+
+
+def test_user_dependency_blocked_command_alias_does_not_hide_portable_command(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given colliding command aliases, only one of which has an unavailable required skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\ntools: Read\n---\nRestricted.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/clean-gone.md").write_text("Reply PORTABLE.\n", encoding="utf-8")
+    (source / "commands/clean_gone.md").write_text("Load sample:rules skill\n", encoding="utf-8")
+    # When dependency pruning precedes output collision checking, preserve the independent command.
+    report, files = preview(source, "codex")
+    assert b"Reply PORTABLE." in files["codex/home/.agents/skills/sample-clean-gone/SKILL.md"]
+    assert set(report["owners"].values()) == {"sample:clean-gone"}
+    assert any(item["name"] == "sample:clean_gone" and item["status"] == "blocked" for item in report["components"])
+
+
+@pytest.mark.parametrize("description", ["{foo: bar}", "[Review]", "true", "17", '"   "'])
+@pytest.mark.parametrize("target", ["codex", "opencode-v2"])
+def test_user_agent_requires_native_string_description(tmp_path, target, description) -> None:
+    from yi.adapters import preview
+
+    # Given an agent whose descriptive metadata violates the native agent string contract.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/check.md").write_text(f"---\ndescription: {description}\n---\nReview text.\n", encoding="utf-8")
+    # When planned, report a blocker instead of emitting invalid TOML or non-string native metadata.
+    report, files = preview(source, target)
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
+
+
+def test_user_command_dependency_cannot_hide_collision_with_its_required_skill(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a portable skill and a command alias requiring that skill while occupying the same native path.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/clean-gone/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/clean_gone.md").write_text("Load sample:clean-gone skill\n", encoding="utf-8")
+    # When planned, resolve the real skill before checking command overlap; do not misreport it as unavailable.
+    with pytest.raises(ValueError, match="collision"):
+        preview(source, "codex")

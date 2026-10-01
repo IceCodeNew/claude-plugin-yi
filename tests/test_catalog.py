@@ -322,3 +322,17 @@ def test_user_malformed_install_entries_do_not_hide_valid_sources(tmp_path) -> N
     items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
     assert any(item["name"] == "good:check" for item in items)
     assert len([item for item in items if item.get("status") == "unresolved"]) == 4
+
+
+def test_user_standalone_source_with_claude_directory_does_not_require_registry(tmp_path) -> None:
+    # Given a standalone skill and a valid empty Claude directory without an installation index.
+    source = tmp_path / "standalone"
+    source.mkdir()
+    (source / "SKILL.md").write_text("---\ndescription: Inspect\n---\nRead text.\n", encoding="utf-8")
+    root = tmp_path / "claude"
+    root.mkdir()
+    # When migration also supplies the catalog scope, the standalone source remains resolvable.
+    result = run_cli(
+        tmp_path, "migrate", "--source", str(source), "--claude-dir", str(root), "--target", "pi", "--dry-run", "--json"
+    )
+    assert any(path.endswith("/SKILL.md") for path in result["files"])
