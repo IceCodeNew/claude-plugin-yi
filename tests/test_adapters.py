@@ -1347,3 +1347,27 @@ def test_user_blocked_command_alias_does_not_prevent_portable_sibling(tmp_path) 
     assert b"Reply PORTABLE." in files["codex/home/.agents/skills/sample-clean-gone/SKILL.md"]
     assert set(report["owners"].values()) == {"sample:clean-gone"}
     assert any(item["name"] == "sample:clean_gone" and item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_command_alias_cannot_impersonate_blocked_skill_dependency(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a blocked skill, its dependent, and an independent command with the same native destination.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, extra, body in (
+        ("clean-gone", "model: opus\n", "Required skill behavior."),
+        ("needs", "", "Read ../clean-gone/SKILL.md."),
+    ):
+        path = source / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\ndescription: Guide\n{extra}---\n{body}\n", encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/clean_gone.md").write_text("Reply COMMAND instead.\n", encoding="utf-8")
+    # When dependencies resolve, an unrelated command is not proof that the required skill exists.
+    report, files = preview(source, "codex")
+    assert b"Reply COMMAND instead." in files["codex/home/.agents/skills/sample-clean-gone/SKILL.md"]
+    assert "codex/home/.agents/skills/sample-needs/SKILL.md" not in files
+    assert set(report["owners"].values()) == {"sample:clean_gone"}
+    assert any(item["name"] == "sample:needs" and item["kind"] == "skill-dependency" for item in report["components"])

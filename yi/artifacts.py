@@ -2,12 +2,14 @@
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from yi import shared_config
 from yi.manifest import read_manifest
+from yi.targets import SKILL_ROOTS
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -65,6 +67,7 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
     }
     payload = merge_manifest(prior, own_report, own_files)
     removed = set(owned) - set(payload["hashes"]) - shared_config.SHARED
+    protect_dependencies(root, prior, payload, removed, files)
     executable = set(payload["executables"])
     protect_reviewed(prior, files, removed, executable)
     outputs = {
@@ -192,6 +195,24 @@ def merge_manifest(prior: dict, report: dict, files: dict[str, bytes]) -> dict:
         "configuration": report.get("configuration", {}),
         "complete": False,
     }
+
+
+def protect_dependencies(root: Path, prior: dict, payload: dict, removed: set[str], files: dict) -> None:
+    """Reject partial updates that remove a retained skill's generated sibling."""
+    skill_root = Path(payload["target"]) / "home" / SKILL_ROOTS[payload["target"]]
+    for name in prior.get("hashes", {}).keys() - files.keys():
+        path = Path(name)
+        if path.name != "SKILL.md" or path.parent.parent != skill_root or name not in payload["hashes"]:
+            continue
+        owner = prior.get("owners", {}).get(name)
+        if owner != payload["owners"].get(name):
+            continue
+        text = (root / path).read_text(encoding="utf-8")
+        for sibling in re.findall(r"\.\./([^/\s]+)/SKILL\.md", text):
+            dependency = str(skill_root / sibling / "SKILL.md")
+            if dependency in removed or prior.get("owners", {}).get(dependency) != payload["owners"].get(dependency):
+                msg = f"Cannot replace retained skill dependency {dependency}, used by {name}. Select all components."
+                raise ValueError(msg)
 
 
 def protect_reviewed(prior: dict, files: dict[str, bytes], removed: set[str], executable: set[str]) -> None:

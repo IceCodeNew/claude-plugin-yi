@@ -49,7 +49,7 @@ def preview(
         owners.update(dict.fromkeys(resources, item["name"]))
         executables.extend(executable_resources)
         components.extend(diagnostics)
-    components.extend(rewrite_skill_links(files, inventory, plugin, target, selected))
+    components.extend(rewrite_skill_links(files, owners, inventory, target, selected))
     owners, executables, components = retained_resources(files, owners, executables, components)
     if not selected and not manifest.get("standalone"):
         components.extend(plugin_blockers(manifest, target))
@@ -355,27 +355,37 @@ def skill_policy(path: Path, destination: Path, target: str) -> dict[str, bytes]
 
 
 def rewrite_skill_links(
-    files: dict[str, bytes], inventory: list[dict], plugin: str, target: str, selected: list[str] | None = None
+    files: dict[str, bytes],
+    owners: dict[str, str],
+    inventory: list[dict],
+    target: str,
+    selected: list[str] | None = None,
 ) -> list[dict]:
-    """Rewrite available sibling links and isolate blocked dependency components."""
+    """Rewrite source-owned sibling links and isolate blocked dependency components."""
+    if not inventory:
+        return []
+    plugin = inventory[0]["plugin"]
     siblings = {Path(item["path"]).parent.name for item in inventory if item["kind"] == "skill"}
     root = Path(target) / "home" / SKILL_ROOTS[target]
-    entries = {str(root / f"{plugin}-{sibling}" / "SKILL.md"): sibling for sibling in sorted(siblings)}
+    skill_owners = {item["name"] for item in inventory if item["kind"] == "skill"}
+    entries = {
+        str(root / f"{plugin}-{sibling}" / "SKILL.md"): sibling
+        for sibling in sorted(siblings)
+        if owners.get(str(root / f"{plugin}-{sibling}" / "SKILL.md")) in skill_owners
+    }
     dependencies = {}
     for name in (entry for entry in entries if entry in files):
         text = files[name].decode("utf-8")
         dependencies[name] = set(re.findall(r"\.\./([^/\s]+)/SKILL\.md", text)) & siblings
     diagnostics = []
     while True:
+        available = {entries[name] for name in dependencies if name in files}
         unavailable = {
-            name: refs
-            for name, refs in dependencies.items()
-            if name in files and any(str(root / f"{plugin}-{ref}" / "SKILL.md") not in files for ref in refs)
+            name: refs - available for name, refs in dependencies.items() if name in files and refs - available
         }
         if not unavailable:
             break
-        for name, refs in unavailable.items():
-            missing = {ref for ref in refs if str(root / f"{plugin}-{ref}" / "SKILL.md") not in files}
+        for name, missing in unavailable.items():
             if selected and any(f"{plugin}:{ref}" not in selected for ref in missing):
                 msg = "Missing skill dependencies: " + ", ".join(f"{plugin}:{ref}" for ref in sorted(missing))
                 raise ValueError(msg)

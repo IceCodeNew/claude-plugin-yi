@@ -697,3 +697,35 @@ def test_user_separate_command_selections_cannot_take_over_sibling_outputs(tmp_p
     with pytest.raises(ValueError, match="retained component"):
         apply(root, report, files)
     assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_user_partial_regeneration_preserves_retained_skill_dependencies(tmp_path, replacement) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given generated linked skills and an incompatible update to only the dependency.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name, body in (("clean-gone", "Required."), ("needs", "Read ../clean-gone/SKILL.md.")):
+        path = source / "skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\ndescription: Guide\n---\n{body}\n", encoding="utf-8")
+    root = tmp_path / "output"
+    report, files = preview(source, "codex")
+    apply(root, report, files)
+    (source / "skills/clean-gone/SKILL.md").write_text(
+        "---\ndescription: Guide\nmodel: opus\n---\nRequired.\n", encoding="utf-8"
+    )
+    original = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    # When updating selected components, refuse removal or takeover of a retained dependency.
+    selected = ["sample:clean-gone"]
+    if replacement:
+        (source / "commands").mkdir()
+        (source / "commands/clean_gone.md").write_text("Reply COMMAND instead.\n", encoding="utf-8")
+        selected.append("sample:clean_gone")
+    report, files = preview(source, "codex", selected)
+    with pytest.raises(ValueError, match=r"retained.*dependency"):
+        apply(root, report, files)
+    assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
