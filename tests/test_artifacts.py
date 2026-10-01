@@ -898,3 +898,32 @@ def test_user_publication_permission_failure_restores_prior_files(tmp_path, oper
     assert not list(root.glob(".yi-publish-*"))
     # Then fixing the filesystem permits normal retry.
     assert apply(root, report, proposed)
+
+
+def test_user_partial_updates_cannot_remove_retained_extensionless_sibling_resource(tmp_path) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given a retained extensionless script requiring a sibling script, not merely its skill entry document.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        (path / "scripts").mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/scripts/start").write_text(
+        '#!/bin/sh\n"$(dirname "$0")/../../second/scripts/receipt"\n', encoding="utf-8"
+    )
+    receipt = source / "skills/second/scripts/receipt"
+    receipt.write_text("#!/bin/sh\nprintf RECEIPT\n", encoding="utf-8")
+    root = tmp_path / "output"
+    report, files = preview(source, "pi")
+    apply(root, report, files)
+    receipt.unlink()
+    original = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    # When only the sibling is regenerated, preserve the retained caller by rejecting the removed concrete resource.
+    report, files = preview(source, "pi", ["sample:second"])
+    with pytest.raises(ValueError, match=r"retained.*dependency"):
+        apply(root, report, files)
+    assert original == {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}

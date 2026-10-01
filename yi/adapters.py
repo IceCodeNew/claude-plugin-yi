@@ -1,6 +1,7 @@
 """Plan target files and report unsupported plugin behavior."""
 
 import json
+import posixpath
 import re
 import shlex
 from pathlib import Path
@@ -538,6 +539,70 @@ def skill_policy(path: Path, destination: Path, target: str, *, text: str | None
     return {}
 
 
+def resource_text(content: bytes) -> str | None:
+    """Leave opaque or NUL-bearing resources outside textual link relocation."""
+    if b"\x00" in content:
+        return None
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def sibling_resource_links(files: dict, owners: dict, inventory: list[dict], target: str) -> dict:
+    """Resolve literal relative references against actual source skill resource trees."""
+    skills = {item["name"]: item for item in inventory if item["kind"] == "skill"}
+    references = {}
+    pattern = re.compile(r"(?:(?<![A-Za-z0-9_./-])|(?<=\)/))(?:\.\./)+[A-Za-z0-9_-]+/[A-Za-z0-9_./+-]+")
+    for name, content in files.items():
+        owner = owners.get(name)
+        if owner not in skills:
+            continue
+        item = skills[owner]
+        destination = Path(skill_entry(item, target)).parent
+        if not Path(name).is_relative_to(destination):
+            continue
+        relative = Path(name).relative_to(destination)
+        source_file = Path(item["path"]).parent / relative
+        text = resource_text(content)
+        if text is None:
+            continue
+        for match in pattern.finditer(text):
+            literal = match[0].rstrip(".")
+            original = source_file.parent / literal
+            if any(parent.is_symlink() for parent in (original, *original.parents)):
+                msg = f"Source resource symlink requires review: {original}"
+                raise ValueError(msg)
+            resource = original.resolve()
+            for dependency, sibling in skills.items():
+                sibling_root = Path(sibling["path"]).parent.resolve()
+                if dependency == owner or not resource.is_relative_to(sibling_root):
+                    continue
+                relocated = Path(skill_entry(sibling, target)).parent / resource.relative_to(sibling_root)
+                replacement = posixpath.relpath(str(relocated), str(Path(name).parent))
+                if literal.endswith("/"):
+                    replacement += "/"
+                references.setdefault(owner, []).append(
+                    (
+                        name,
+                        match.start(),
+                        match.start() + len(literal),
+                        replacement,
+                        dependency,
+                        str(relocated),
+                        match.end() == len(text) or text[match.end()] in " \t\r\n\"'`),;:*]}",
+                    )
+                )
+    return references
+
+
+def generated_resource(files: dict, owners: dict, path: str, owner: str) -> bool:
+    """Require a concrete generated file or nonempty directory with source ownership."""
+    return any(
+        owners.get(name) == owner and (name == path or name.startswith(path.rstrip("/") + "/")) for name in files
+    )
+
+
 def rewrite_skill_links(
     files: dict[str, bytes],
     owners: dict[str, str],
@@ -545,51 +610,72 @@ def rewrite_skill_links(
     target: str,
     selected: list[str] | None = None,
 ) -> list[dict]:
-    """Rewrite source-owned sibling links and isolate blocked dependency components."""
-    if not inventory:
-        return []
-    plugin = inventory[0]["plugin"]
-    siblings = {Path(item["path"]).parent.name for item in inventory if item["kind"] == "skill"}
-    root = Path(target) / "home" / SKILL_ROOTS[target]
-    skill_owners = {item["name"] for item in inventory if item["kind"] == "skill"}
-    entries = {
-        str(root / f"{plugin}-{sibling}" / "SKILL.md"): sibling
-        for sibling in sorted(siblings)
-        if owners.get(str(root / f"{plugin}-{sibling}" / "SKILL.md")) in skill_owners
-    }
-    dependencies = {}
-    for name in (entry for entry in entries if entry in files):
-        text = files[name].decode("utf-8")
-        dependencies[name] = set(re.findall(r"\.\./([^/\s]+)/SKILL\.md", text)) & siblings
+    """Rewrite source-owned sibling resources and isolate unavailable dependencies."""
+    skills = {item["name"]: item for item in inventory if item["kind"] == "skill"}
+    references = sibling_resource_links(files, owners, inventory, target)
     diagnostics = []
     while True:
-        available = {entries[name] for name in dependencies if name in files}
-        unavailable = {
-            name: refs - available for name, refs in dependencies.items() if name in files and refs - available
+        available = {
+            name
+            for name, item in skills.items()
+            if owners.get(skill_entry(item, target)) == name and skill_entry(item, target) in files
         }
+        unavailable = {
+            name: {
+                ref[4]
+                for ref in refs
+                if not ref[6] or ref[4] not in available or not generated_resource(files, owners, ref[5], ref[4])
+            }
+            for name, refs in references.items()
+            if name in available
+        }
+        unavailable = {name: missing for name, missing in unavailable.items() if missing}
         if not unavailable:
             break
         for name, missing in unavailable.items():
-            if selected and any(f"{plugin}:{ref}" not in selected for ref in missing):
-                msg = "Missing skill dependencies: " + ", ".join(f"{plugin}:{ref}" for ref in sorted(missing))
+            if selected and missing - set(selected):
+                msg = "Missing skill dependencies: " + ", ".join(sorted(missing))
                 raise ValueError(msg)
             diagnostics.append(
                 {
-                    "name": f"{plugin}:{entries[name]}",
+                    "name": name,
                     "kind": "skill-dependency",
                     "status": "blocked",
                     "reason": "Selected skill has incompatible dependencies: " + ", ".join(sorted(missing)),
                 }
             )
             for resource in list(files):
-                if owners.get(resource) == owners[name]:
+                if owners.get(resource) == name:
                     del files[resource]
-    for name in (entry for entry in dependencies if entry in files):
-        files[name] = re.sub(
-            r"\.\./([^/\s]+)/SKILL\.md",
-            lambda match: f"../{plugin}-{match[1]}/SKILL.md" if match[1] in siblings else match[0],
-            files[name].decode("utf-8"),
-        ).encode()
+    diagnostics.extend(relocate_sibling_resources(files, references))
+    return diagnostics
+
+
+def relocate_sibling_resources(files: dict, references: dict) -> list[dict]:
+    """Replace original relative-reference spans once and persist generated resource edges."""
+    diagnostics = []
+    for owner, refs in references.items():
+        active = [ref for ref in refs if ref[0] in files]
+        for name in sorted({ref[0] for ref in active}):
+            text = files[name].decode("utf-8")
+            for _, start, end, replacement, _, _, _ in sorted(
+                (ref for ref in active if ref[0] == name), key=lambda ref: ref[1], reverse=True
+            ):
+                text = text[:start] + replacement + text[end:]
+            files[name] = text.encode()
+        if active:
+            dependencies = {
+                path for ref in active for path in files if path == ref[5] or path.startswith(ref[5].rstrip("/") + "/")
+            }
+            diagnostics.append(
+                {
+                    "name": owner,
+                    "kind": "skill-dependency",
+                    "status": "unverified",
+                    "reason": "Sibling resources relocated. Verify runtime behavior.",
+                    "dependencies": sorted(dependencies),
+                }
+            )
     return diagnostics
 
 

@@ -193,11 +193,11 @@ def protect_dependencies(root: Path, prior: dict, payload: dict, removed: set[st
     command_dependencies = {
         item.get("name"): item.get("dependencies", [])
         for item in prior.get("components", [])
-        if item.get("kind") == "command-dependency"
+        if item.get("kind") in {"command-dependency", "skill-dependency"}
     }
     for name in prior.get("hashes", {}).keys() - files.keys():
         path = Path(name)
-        if path.suffix not in {".md", ".js"} or name not in payload["hashes"]:
+        if name not in payload["hashes"]:
             continue
         owner = prior.get("owners", {}).get(name)
         if owner != payload["owners"].get(name):

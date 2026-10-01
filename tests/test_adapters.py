@@ -1875,3 +1875,216 @@ def test_user_invalid_utf8_blocks_only_the_affected_prompt_component(tmp_path, l
     blocked = next(item for item in report["components"] if item["name"] == "sample:bad")
     assert blocked["status"] == "blocked"
     assert "UTF-8" in blocked["reason"]
+
+
+@pytest.mark.parametrize("target", ["ampcode", "codex", "opencode-v2", "pi"])
+def test_user_namespaced_sibling_script_resources_execute_from_unrelated_cwd(tmp_path, target) -> None:
+    import subprocess
+
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given an extensionless entry script using a real sibling resource and a document link to that resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        skill = source / "skills" / name
+        (skill / "scripts").mkdir(parents=True)
+        body = "Run ../second/scripts/receipt.\n" if name == "first" else "Provide receipt.\n"
+        (skill / "SKILL.md").write_text(f"---\ndescription: Guide\n---\n{body}", encoding="utf-8")
+    entry = source / "skills/first/scripts/start"
+    entry.write_text('#!/bin/sh\nset -eu\n"$(dirname "$0")/../../second/scripts/receipt"\n', encoding="utf-8")
+    receipt = source / "skills/second/scripts/receipt"
+    receipt.write_text('#!/bin/sh\nprintf "SIBLING-RESOURCE-RECEIPT\\n"\n', encoding="utf-8")
+    entry.chmod(0o755)
+    receipt.chmod(0o755)
+    original = entry.read_bytes()
+    root = tmp_path / "output"
+    # When generated, relative resource links resolve inside the target layout without changing source files.
+    report, files = preview(source, target)
+    apply(root, report, files)
+    start = next(root / name for name in files if name.endswith("sample-first/scripts/start"))
+    result = subprocess.run([str(start)], cwd=tmp_path, capture_output=True, text=True, check=False)  # noqa: S603 - Task-owned fixed synthetic receipt scripts.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "SIBLING-RESOURCE-RECEIPT\n"
+    assert entry.read_bytes() == original
+    with pytest.raises(ValueError, match="Missing skill dependencies"):
+        preview(source, target, ["sample:first"])
+
+
+@pytest.mark.parametrize("data", [b"\xff../second/note.txt", b"\x00../second/note.txt"])
+def test_user_sibling_relocation_preserves_binary_resources(tmp_path, data) -> None:
+    from yi.adapters import preview
+
+    # Given an opaque resource that happens to contain bytes resembling a sibling path.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/blob.bin").write_bytes(data)
+    (source / "skills/second/note.txt").write_text("Note.\n", encoding="utf-8")
+    # When exported, binary payloads remain byte-identical and are never used to infer executable dependencies.
+    _report, files = preview(source, "pi")
+    assert files["pi/home/.pi/agent/skills/sample-first/blob.bin"] == data
+
+
+def test_user_absolute_path_fragments_are_not_sibling_references(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a literal absolute path whose tail resembles an otherwise real sibling.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    body = "Do not use /tmp/../second/note.txt or prefix../second/note.txt.\n"
+    (source / "skills/first/SKILL.md").write_text("---\ndescription: Guide\n---\n" + body, encoding="utf-8")
+    (source / "skills/second/note.txt").write_text("Note.\n", encoding="utf-8")
+    # When generated, absolute/prefixed path substrings retain their original meaning.
+    _report, files = preview(source, "pi")
+    assert files["pi/home/.pi/agent/skills/sample-first/SKILL.md"].endswith(body.encode())
+
+
+def test_user_unselected_sibling_resource_symlink_cannot_redirect_dependency(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given an unselected sibling resource symlink pointing at another selected skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second", "third"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/SKILL.md").write_text(
+        "---\ndescription: Guide\n---\nRead ../second/link/note.txt.\n", encoding="utf-8"
+    )
+    (source / "skills/third/note.txt").write_text("Note.\n", encoding="utf-8")
+    (source / "skills/second/link").symlink_to(source / "skills/third", target_is_directory=True)
+    # When following a discovered edge, refuse the symlink rather than relabel it as the third skill.
+    with pytest.raises(ValueError, match="symlink"):
+        preview(source, "pi", ["sample:first", "sample:third"])
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_user_empty_sibling_directory_is_not_reported_as_available_resource(tmp_path, missing) -> None:
+    from yi.adapters import preview
+
+    # Given a sibling directory that contributes no generated files.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/SKILL.md").write_text(
+        "---\ndescription: Guide\n---\nRead ../second/empty/.\n", encoding="utf-8"
+    )
+    if not missing:
+        (source / "skills/second/empty").mkdir()
+    # When planning, the consumer is blocked instead of linking an absent output directory.
+    report, files = preview(source, "pi")
+    assert "pi/home/.pi/agent/skills/sample-first/SKILL.md" not in files
+    assert any(item["name"] == "sample:first" and item["status"] == "blocked" for item in report["components"])
+
+
+def test_user_sibling_directory_glob_keeps_its_separator(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a real cross-skill directory followed by a glob that remains literal.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/SKILL.md").write_text(
+        "---\ndescription: Guide\n---\nRead ../second/scripts/*.\n", encoding="utf-8"
+    )
+    (source / "skills/second/scripts").mkdir()
+    (source / "skills/second/scripts/note.txt").write_text("Note.\n", encoding="utf-8")
+    # When namespaced, the star stays within the migrated scripts directory, not a new filename prefix.
+    _report, files = preview(source, "pi")
+    assert b"../sample-second/scripts/*" in files["pi/home/.pi/agent/skills/sample-first/SKILL.md"]
+
+
+def test_user_sibling_filename_is_not_tracked_by_prefix(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given two resources sharing a prefix but one filename outside the bounded relocation grammar.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/SKILL.md").write_text(
+        "---\ndescription: Guide\n---\nRead ../second/receipt+old.\n", encoding="utf-8"
+    )
+    for name in ("receipt", "receipt+old"):
+        (source / "skills/second" / name).write_text("Receipt.\n", encoding="utf-8")
+    # When rewritten, track the complete concrete resource rather than a shared filename prefix.
+    report, files = preview(source, "pi")
+    assert b"../sample-second/receipt+old" in files["pi/home/.pi/agent/skills/sample-first/SKILL.md"]
+    dependencies = next(
+        item["dependencies"]
+        for item in report["components"]
+        if item["name"] == "sample:first" and item["kind"] == "skill-dependency"
+    )
+    assert dependencies == ["pi/home/.pi/agent/skills/sample-second/receipt+old"]
+
+
+def test_user_sibling_traversal_cannot_normalize_away_a_source_symlink(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a path that enters a symlink and then traverses upwards before reaching an apparent sibling.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "third"):
+        path = source / "skills" / name
+        path.mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/SKILL.md").write_text(
+        "---\ndescription: Guide\n---\nRead ../../bridge/../skills/third/data.\n", encoding="utf-8"
+    )
+    (source / "skills/third/data").write_text("Inside.\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    (outside / "skills/third").mkdir(parents=True)
+    (outside / "skills/third/data").write_text("Outside.\n", encoding="utf-8")
+    (source / "bridge").symlink_to(outside / "deep", target_is_directory=True)
+    # When resolving the original path, enforce link review before cancelling dot segments.
+    with pytest.raises(ValueError, match="symlink"):
+        preview(source, "pi")
+
+
+def test_user_unsupported_sibling_backup_suffix_blocks_consumer(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a backup filename whose supported prefix is another existing resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        path = source / "skills" / name
+        (path / "scripts").mkdir(parents=True)
+        (path / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    (source / "skills/first/SKILL.md").write_text(
+        "---\ndescription: Guide\n---\nRead ../second/scripts/receipt~.\n", encoding="utf-8"
+    )
+    for name in ("receipt", "receipt~"):
+        (source / "skills/second/scripts" / name).write_text("Receipt.\n", encoding="utf-8")
+    # When a token is outside the bounded grammar, refuse the consumer instead of recording a wrong prefix edge.
+    report, files = preview(source, "pi")
+    assert "pi/home/.pi/agent/skills/sample-first/SKILL.md" not in files
+    assert any(item["name"] == "sample:first" and item["status"] == "blocked" for item in report["components"])
