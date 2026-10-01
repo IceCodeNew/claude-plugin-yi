@@ -794,3 +794,107 @@ def test_user_inert_examples_are_not_retained_command_dependency_contracts(tmp_p
     assert (root / "codex/home/.agents/skills/sample-check/SKILL.md").is_file()
     if location == "resource":
         assert (root / "codex/home/.local/share/yi/resources/sample/command/check/examples/note.md").is_file()
+
+
+@pytest.mark.parametrize("failure", ["shared-content", "plugin-manifest"])
+def test_user_real_write_failure_preserves_artifacts_and_allows_retry(tmp_path, failure) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+    from yi.checks import inspect
+
+    # Given a valid shared configuration and a new contribution constrained by real kernel file-size limits.
+    sources = {}
+    for plugin in ("alpha", "beta"):
+        source = tmp_path / plugin
+        (source / ".claude-plugin").mkdir(parents=True)
+        (source / ".claude-plugin/plugin.json").write_text(json.dumps({"name": plugin}), encoding="utf-8")
+        argument = "x" * 8192 if failure == "shared-content" and plugin == "beta" else "fixture"
+        (source / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"docs": {"command": "fixture", "args": [argument]}}}), encoding="utf-8"
+        )
+        sources[plugin] = source
+    if failure == "plugin-manifest":
+        skill = sources["beta"] / "skills/check"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\ndescription: Check\n---\nRead text.\n", encoding="utf-8")
+        for index in range(24):
+            (skill / f"note-{index}.txt").write_text("Inert.\n", encoding="utf-8")
+    root = tmp_path / "output"
+    report, files = preview(sources["alpha"], "codex")
+    apply(root, report, files)
+    original = {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mode & 0o777)
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    }
+    script = (
+        "import resource,signal,sys; from pathlib import Path; "
+        "from yi.adapters import preview; from yi.artifacts import apply; "
+        "signal.signal(signal.SIGXFSZ,signal.SIG_IGN); "
+        "resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024)); "
+        "report,files=preview(Path(sys.argv[1]),'codex'); apply(Path(sys.argv[2]),report,files)"
+    )
+    # When an actual file write fails, preserve all prior data/metadata/modes and avoid partial beta output.
+    # The constrained child must not truncate the coverage collector's SQLite file too.
+    result = subprocess.run(  # noqa: S603 - Real local process with child-only kernel resource limit and task-owned paths.
+        [sys.executable, "-c", script, str(sources["beta"]), str(root)],
+        env={key: value for key, value in os.environ.items() if key != "COVERAGE_PROCESS_CONFIG"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "File too large" in result.stderr
+    current = {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mode & 0o777)
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    }
+    assert current == original
+    assert inspect(root)["intact"]
+    # Then an unrestricted retry succeeds and identical subsequent generation remains unchanged.
+    report, files = preview(sources["beta"], "codex")
+    assert apply(root, report, files)
+    assert inspect(root)["intact"]
+    config = (root / "codex/home/.codex/config.toml").read_text(encoding="utf-8")
+    assert "alpha-docs" in config
+    assert "beta-docs" in config
+    report, files = preview(sources["beta"], "codex")
+    assert not apply(root, report, files)
+
+
+@pytest.mark.parametrize("operation", ["replace", "remove"])
+def test_user_publication_permission_failure_restores_prior_files(tmp_path, operation) -> None:
+    from yi.artifacts import apply
+
+    # Given an owned two-directory operation where a later publication or stale deletion is denied.
+    root = tmp_path / "output"
+    names = ["pi/home/first/a.txt", "pi/home/locked/b.txt"]
+    report = {"plugin": "sample", "target": "pi", "owners": dict.fromkeys(names, "sample:check"), "components": []}
+    original_files = dict.fromkeys(names, b"original")
+    apply(root, report, original_files)
+    original = {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    }
+    locked = root / "pi/home/locked"
+    locked.chmod(0o555)
+    proposed = {names[0]: b"changed"}
+    if operation == "replace":
+        proposed[names[1]] = b"changed"
+    try:
+        # When real filesystem permissions reject a late mutation, restore earlier replaced files and metadata.
+        with pytest.raises(PermissionError):
+            apply(root, report, proposed)
+    finally:
+        locked.chmod(0o755)
+    current = {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts
+    }
+    assert current == original
+    assert not list(root.glob(".yi-publish-*"))
+    # Then fixing the filesystem permits normal retry.
+    assert apply(root, report, proposed)

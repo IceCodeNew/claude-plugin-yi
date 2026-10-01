@@ -9,6 +9,7 @@ from pathlib import Path
 
 from yi import shared_config
 from yi.manifest import read_manifest
+from yi.publication import publish
 from yi.targets import SKILL_ROOTS
 
 
@@ -80,19 +81,7 @@ def apply(root: Path, report: dict, files: dict[str, bytes]) -> bool:
     if not (root / ".gitignore").exists():
         outputs[".gitignore"] = b"**/.cache/\n**/auth.json\n**/auth.jsonc\n**/credentials.json\n**/.env\n**/*.log\n"
     validate_paths(root, [*outputs, *removed])
-    changed = bool(removed)
-    for relative, content in outputs.items():
-        destination = root / relative
-        mode = 0o755 if relative in executable else 0o644
-        if destination.is_file() and destination.read_bytes() == content and destination.stat().st_mode & 0o777 == mode:
-            continue
-        changed = True
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(content)
-        destination.chmod(mode)
-    for relative in removed:
-        (root / relative).unlink()
-    return changed
+    return publish(root, outputs, removed, executable)
 
 
 def prepare_repository(root: Path) -> bool:
