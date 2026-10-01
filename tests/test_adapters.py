@@ -643,6 +643,20 @@ def test_user_rejects_colliding_agent_destinations(tmp_path) -> None:
         preview(source, "codex")
 
 
+@pytest.mark.parametrize("path", ["codex/home/.codex/config.toml", "opencode-v2/home/.config/opencode/opencode.json"])
+def test_user_shared_mcp_names_cannot_collide(path) -> None:
+    from yi.shared_config import combine
+
+    # Given two independent contributions with an identical native MCP name.
+    if path.endswith("toml"):
+        pieces = ['[mcp_servers."a-b-c"]\ncommand="one"\n', '[mcp_servers."a-b-c"]\ncommand="two"\n']
+    else:
+        pieces = [json.dumps({"mcp": {"servers": {"a-b-c": {"command": [name]}}}}) for name in ("one", "two")]
+    # When composed, neither duplicate tables nor silent last-writer wins are allowed.
+    with pytest.raises(ValueError, match="collision"):
+        combine(path, pieces)
+
+
 def test_user_agent_declared_twice_is_converted_once(tmp_path) -> None:
     from yi.adapters import preview
 
@@ -1250,6 +1264,14 @@ def test_user_invalid_generated_skill_name_blocks_only_that_skill(tmp_path) -> N
     assert "name" in report["components"][0]["reason"].lower()
 
 
+def test_user_shared_json_contribution_requires_object_container() -> None:
+    from yi.shared_config import combine
+
+    # Given persisted contribution text that is valid JSON but not a native config object.
+    with pytest.raises(TypeError, match="object"):
+        combine("opencode-v2/home/.config/opencode/opencode.json", ["[]"])
+
+
 @pytest.mark.parametrize("description", [None, 7, "", "   "])
 def test_user_invalid_skill_description_blocks_output(tmp_path, description) -> None:
     from yi.adapters import preview
@@ -1853,6 +1875,42 @@ def test_user_invalid_utf8_blocks_only_the_affected_prompt_component(tmp_path, l
     blocked = next(item for item in report["components"] if item["name"] == "sample:bad")
     assert blocked["status"] == "blocked"
     assert "UTF-8" in blocked["reason"]
+
+
+@pytest.mark.parametrize("target", ["ampcode", "codex", "opencode-v2", "pi"])
+def test_user_namespaced_sibling_script_resources_execute_from_unrelated_cwd(tmp_path, target) -> None:
+    import subprocess
+
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given an extensionless entry script using a real sibling resource and a document link to that resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        skill = source / "skills" / name
+        (skill / "scripts").mkdir(parents=True)
+        body = "Run ../second/scripts/receipt.\n" if name == "first" else "Provide receipt.\n"
+        (skill / "SKILL.md").write_text(f"---\ndescription: Guide\n---\n{body}", encoding="utf-8")
+    entry = source / "skills/first/scripts/start"
+    entry.write_text('#!/bin/sh\nset -eu\n"$(dirname "$0")/../../second/scripts/receipt"\n', encoding="utf-8")
+    receipt = source / "skills/second/scripts/receipt"
+    receipt.write_text('#!/bin/sh\nprintf "SIBLING-RESOURCE-RECEIPT\\n"\n', encoding="utf-8")
+    entry.chmod(0o755)
+    receipt.chmod(0o755)
+    original = entry.read_bytes()
+    root = tmp_path / "output"
+    # When generated, relative resource links resolve inside the target layout without changing source files.
+    report, files = preview(source, target)
+    apply(root, report, files)
+    start = next(root / name for name in files if name.endswith("sample-first/scripts/start"))
+    result = subprocess.run([str(start)], cwd=tmp_path, capture_output=True, text=True, check=False)  # noqa: S603 - Task-owned fixed synthetic receipt scripts.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "SIBLING-RESOURCE-RECEIPT\n"
+    assert entry.read_bytes() == original
+    with pytest.raises(ValueError, match="Missing skill dependencies"):
+        preview(source, target, ["sample:first"])
 
 
 @pytest.mark.parametrize("data", [b"\xff../second/note.txt", b"\x00../second/note.txt"])
