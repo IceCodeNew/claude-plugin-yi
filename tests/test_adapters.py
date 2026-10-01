@@ -2088,3 +2088,43 @@ def test_user_unsupported_sibling_backup_suffix_blocks_consumer(tmp_path) -> Non
     report, files = preview(source, "pi")
     assert "pi/home/.pi/agent/skills/sample-first/SKILL.md" not in files
     assert any(item["name"] == "sample:first" and item["status"] == "blocked" for item in report["components"])
+
+
+@pytest.mark.parametrize(
+    "relative", [".aws/config", ".ssh/config", ".npmrc", ".pypirc", ".netrc", ".env.txt", ".git/config"]
+)
+def test_user_skill_resources_never_export_local_configuration(tmp_path, relative) -> None:
+    from yi.adapters import preview
+
+    # Given synthetic local configuration bundled beside portable guidance.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\ndescription: Guide\n---\nRead text.\n", encoding="utf-8")
+    resource = skill / relative
+    resource.parent.mkdir(parents=True, exist_ok=True)
+    resource.write_text("SYNTHETIC_LOCAL_SETTING=yes\n", encoding="utf-8")
+    # When previewed, refuse before local settings become exportable artifacts.
+    with pytest.raises(ValueError, match="Sensitive"):
+        preview(source, "pi")
+
+
+@pytest.mark.parametrize("target", ["codex", "opencode-v2"])
+def test_user_invalid_agent_encoding_preserves_independent_agent(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given one invalid UTF-8 agent and an independent valid one.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/bad.md").write_bytes(b"---\ndescription: Bad\n---\n\xff")
+    (source / "agents/good.md").write_text("---\ndescription: Good\n---\nReview text.\n", encoding="utf-8")
+    # When planned, block only the invalid component and retain native output for the valid agent.
+    report, files = preview(source, target)
+    assert any("sample-good" in path for path in files)
+    blocked = next(item for item in report["components"] if item["name"] == "sample:agent:bad")
+    assert blocked["status"] == "blocked"
+    assert "UTF-8" in blocked["reason"]

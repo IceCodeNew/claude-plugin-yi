@@ -8,7 +8,7 @@ from pathlib import Path
 
 from yi.catalog import checked_source, discover, source_manifest
 from yi.frontmatter import read_yaml, yaml_parser
-from yi.safety import reject_sensitive
+from yi.safety import reject_local_configuration, reject_sensitive
 from yi.target_config import agent_files, hook_files, mcp_files
 from yi.targets import SKILL_ROOTS
 
@@ -186,9 +186,7 @@ def example_documents(source: Path, item: dict, target: str) -> tuple[str, dict[
         ):
             msg = f"document-resource: inert regular Markdown/text required: {resource}"
             raise PromptBlockerError(msg)
-        if resource.name.startswith(".env"):
-            msg = f"Sensitive document resource requires review: {resource}"
-            raise ValueError(msg)
+        reject_local_configuration(resource.relative_to(source))
         data = resource.read_bytes()
         reject_sensitive(resource, data)
         decode_prompt(data)
@@ -401,9 +399,7 @@ def skill_files(source: Path, destination: Path) -> tuple[dict[str, bytes], list
             raise ValueError(msg)
         if resource.is_file():
             relative = resource.relative_to(source)
-            if resource.name.startswith(".env") or ".git" in relative.parts:
-                msg = f"Sensitive source resource requires review: {resource}"
-                raise ValueError(msg)
+            reject_local_configuration(relative)
             content = resource.read_bytes()
             reject_sensitive(resource, content)
             name = str(destination / relative)

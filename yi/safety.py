@@ -13,6 +13,16 @@ def reject_sensitive(path: Path, content: bytes) -> None:
         raise ValueError(msg)
 
 
+def reject_local_configuration(path: Path) -> None:
+    """Reject local state and configuration paths without inspecting their values."""
+    if any(
+        part.lower() in {".git", ".aws", ".ssh", ".npmrc", ".pypirc", ".netrc"} or part.lower().startswith(".env")
+        for part in path.parts
+    ) or (".claude" in path.parts and (path.name.startswith("settings") or "credential" in path.name)):
+        msg = f"Sensitive local configuration requires removal or redaction: {path}"
+        raise ValueError(msg)
+
+
 def require_object(value: object, label: str) -> dict:
     """Reject malformed external object containers before lookup."""
     if not isinstance(value, dict):

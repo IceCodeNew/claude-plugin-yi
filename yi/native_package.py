@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from yi.catalog import checked_source, source_manifest
-from yi.safety import reject_sensitive
+from yi.safety import reject_local_configuration, reject_sensitive
 
 EXCLUDED = {
     ".git",
@@ -48,13 +48,7 @@ def preview(source: Path, target: str) -> tuple[dict, dict[str, bytes]]:
         if not path.is_file():
             msg = f"Native package resource is not a regular file: {relative}"
             raise ValueError(msg)
-        if (
-            path.name.startswith(".env")
-            or (".claude" in relative.parts and (path.name.startswith("settings") or "credential" in path.name))
-            or path.name == ".npmrc"
-        ):
-            msg = f"Native package contains local configuration: {relative}"
-            raise ValueError(msg)
+        reject_local_configuration(relative)
         content = path.read_bytes()
         reject_sensitive(path, content)
         if path.name == ".mcp.json":

@@ -118,20 +118,22 @@ def agent_files(
             seen.add(path.resolve())
             content = path.read_bytes()
             reject_sensitive(path, content)
-            text = content.decode("utf-8-sig").replace("\r\n", "\n")
-            header, separator, body = text.removeprefix("---\n").partition("\n---\n")
-            metadata = read_yaml(header) if separator else {}
             name = f"{manifest['name']}-{path.stem}"
             item = {"name": f"{manifest['name']}:agent:{path.stem}", "kind": "agent", "path": str(path)}
-            if "CLAUDE_PLUGIN_ROOT" in text:
+            text = agent_text(content)
+            if text is None or "CLAUDE_PLUGIN_ROOT" in text:
                 diagnostics.append(
                     {
                         **item,
                         "status": "blocked",
-                        "reason": "plugin-root-reference: relocate required resources before migrating this agent.",
+                        "reason": "Agent requires valid UTF-8. Re-encode this source."
+                        if text is None
+                        else "plugin-root-reference: relocate required resources before migrating this agent.",
                     }
                 )
                 continue
+            header, separator, body = text.removeprefix("---\n").partition("\n---\n")
+            metadata = read_yaml(header) if separator else {}
             source_model = metadata.get("model") if isinstance(metadata, dict) else None
             description = metadata.get("description") if isinstance(metadata, dict) else None
             mapped_model = (model_mapping or {}).get(source_model) if isinstance(source_model, str) else None
@@ -187,6 +189,14 @@ def agent_files(
                 }
             )
     return files, diagnostics
+
+
+def agent_text(content: bytes) -> str | None:
+    """Normalize valid source text without aborting other agents on encoding errors."""
+    try:
+        return content.decode("utf-8-sig").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        return None
 
 
 def hook_files(source: Path, manifest: dict, target: str) -> tuple[dict[str, bytes], list[dict]]:
