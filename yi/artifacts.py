@@ -166,6 +166,12 @@ def merge_manifest(prior: dict, report: dict, files: dict[str, bytes]) -> dict:
         msg = "Existing manifest lacks component ownership; regenerate the whole plugin."
         raise ValueError(msg)
     retained = {name for name, owner in prior_owners.items() if selected and owner not in selected}
+    collisions = sorted(retained & files.keys())
+    if collisions:
+        msg = (
+            "Artifact path belongs to a retained component: " + ", ".join(collisions) + ". Regenerate the whole plugin."
+        )
+        raise ValueError(msg)
     hashes = {name: digest for name, digest in prior.get("hashes", {}).items() if name in retained}
     hashes.update({name: hashlib.sha256(content).hexdigest() for name, content in files.items()})
     owners = {name: owner for name, owner in prior_owners.items() if name in retained}

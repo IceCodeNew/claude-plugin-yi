@@ -505,18 +505,49 @@ def test_user_migrates_plain_prompt_to_amp_palette_command(tmp_path) -> None:
     assert not any(item["status"] == "blocked" for item in report["components"])
 
 
-def test_user_codex_command_becomes_explicit_only_skill(tmp_path) -> None:
+@pytest.mark.parametrize("source_name", ["ping", "clean_gone"])
+def test_user_codex_command_becomes_explicit_only_skill(tmp_path, source_name) -> None:
     from yi.adapters import preview
 
     source = tmp_path / "source"
     (source / ".claude-plugin").mkdir(parents=True)
     (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
     (source / "commands").mkdir()
-    (source / "commands/ping.md").write_text("---\ndescription: Ping\n---\nReply PONG.\n", encoding="utf-8")
-    _report, files = preview(source, "codex")
-    assert b"Reply PONG." in files["codex/home/.agents/skills/sample-ping/SKILL.md"]
-    assert b"allow_implicit_invocation: false" in files["codex/home/.agents/skills/sample-ping/agents/openai.yaml"]
+    # Given a command whose source ID may contain an underscore.
+    (source / f"commands/{source_name}.md").write_text("---\ndescription: Ping\n---\nReply PONG.\n", encoding="utf-8")
+    # When migrated to Codex, use a discoverable native name without changing the source ID.
+    report, files = preview(source, "codex")
+    native_name = "sample-ping" if source_name == "ping" else "sample-clean-gone"
+    destination = f"codex/home/.agents/skills/{native_name}"
+    assert b"Reply PONG." in files[f"{destination}/SKILL.md"]
+    assert f"name: {native_name}\n".encode() in files[f"{destination}/SKILL.md"]
+    assert b"allow_implicit_invocation: false" in files[f"{destination}/agents/openai.yaml"]
+    assert set(report["owners"].values()) == {f"sample:{source_name}"}
     assert not any(".codex/prompts" in name for name in files)
+    if source_name == "clean_gone":
+        assert "sample-clean-gone" in report["components"][0]["reason"]
+
+
+@pytest.mark.parametrize("other_kind", ["command", "skill"])
+def test_user_codex_command_alias_collision_is_rejected(tmp_path, other_kind) -> None:
+    from yi.adapters import preview
+
+    # Given distinct source components that would occupy the same native skill directory.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/clean_gone.md").write_text("Reply FIRST.\n", encoding="utf-8")
+    if other_kind == "command":
+        (source / "commands/clean-gone.md").write_text("Reply SECOND.\n", encoding="utf-8")
+    else:
+        (source / "skills/clean-gone").mkdir(parents=True)
+        (source / "skills/clean-gone/SKILL.md").write_text(
+            "---\nname: clean-gone\ndescription: Reply\n---\nReply SECOND.\n", encoding="utf-8"
+        )
+    # When previewed, fail before returning an ambiguous output plan.
+    with pytest.raises(ValueError, match=r"collision.*sample-clean-gone"):
+        preview(source, "codex")
 
 
 def test_user_codex_template_substitution_is_not_silently_changed(tmp_path) -> None:
@@ -1255,3 +1286,64 @@ def test_user_invalid_skill_description_blocks_output(tmp_path, description) -> 
     report, files = preview(source, "pi")
     assert not files
     assert report["components"][0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("kind", "target", "content", "detail"),
+    [
+        ("command", "pi", "Inspect !`git status`.\n", "inline-context-execution"),
+        ("command", "codex", "Inspect $ARGUMENTS.\n", "native-arguments-unavailable"),
+        ("command", "pi", "Inspect ${CLAUDE_PLUGIN_ROOT}/scripts/check.py.\n", "plugin-root-reference"),
+        ("command", "pi", "---\nmodel: opus\n---\nInspect.\n", "model"),
+        ("command", "pi", "---\n123: value\nmodel: opus\n---\nInspect.\n", "frontmatter-keys"),
+        ("skill", "pi", "---\n123: value\ndescription: Inspect\n---\nInspect.\n", "frontmatter-keys"),
+        ("skill", "pi", "---\ndescription: Inspect\ndisallowed-tools: Bash\n---\nInspect.\n", "disallowed-tools"),
+        ("skill", "pi", "---\ndescription: 123\n---\nInspect.\n", "description"),
+        (
+            "skill",
+            "ampcode",
+            "---\ndescription: Inspect\ndisable-model-invocation: true\n---\nInspect.\n",
+            "manual-invocation-policy-unavailable",
+        ),
+        ("skill", "pi", "---\ndescription: Inspect\n---\nInspect !`git status`.\n", "inline-context-execution"),
+    ],
+)
+def test_user_gets_actionable_prompt_blocker(tmp_path, kind, target, content, detail) -> None:
+    from yi.adapters import preview
+
+    # Given a component with one unsupported requirement and an independent portable component.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    path = source / ("skills/check/SKILL.md" if kind == "skill" else "commands/check.md")
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+    portable = source / "skills/portable/SKILL.md"
+    portable.parent.mkdir(parents=True)
+    portable.write_text("---\ndescription: Portable\n---\nRead text.\n", encoding="utf-8")
+    # When previewed, isolate the blocker and name its source, exact requirement, and next action.
+    report, files = preview(source, target)
+    blocked = next(item for item in report["components"] if item["name"] == "sample:check")
+    assert blocked["status"] == "blocked"
+    assert str(path) in blocked["reason"]
+    assert detail in blocked["reason"]
+    assert "Adapt" in blocked["reason"]
+    assert files
+    assert set(report["owners"].values()) == {"sample:portable"}
+
+
+def test_user_blocked_command_alias_does_not_prevent_portable_sibling(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a portable command and a colliding source with unsupported execution semantics.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/clean-gone.md").write_text("Reply PORTABLE.\n", encoding="utf-8")
+    (source / "commands/clean_gone.md").write_text("---\nmodel: opus\n---\nReply BLOCKED.\n", encoding="utf-8")
+    # When previewed together, only actual outputs participate in collision detection.
+    report, files = preview(source, "codex")
+    assert b"Reply PORTABLE." in files["codex/home/.agents/skills/sample-clean-gone/SKILL.md"]
+    assert set(report["owners"].values()) == {"sample:clean-gone"}
+    assert any(item["name"] == "sample:clean_gone" and item["status"] == "blocked" for item in report["components"])

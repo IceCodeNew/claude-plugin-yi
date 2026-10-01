@@ -40,49 +40,15 @@ def preview(
     for item in inventory:
         if selected and item["name"] not in selected:
             continue
-        path = Path(item["path"])
-        if item["kind"] != "skill":
-            converted = command_file(path, target, plugin)
-            if converted is None:
-                components.append(
-                    {**item, "status": "blocked", "reason": "Command semantics require target-harness review."}
-                )
-            else:
-                files.update(converted)
-                owners.update(dict.fromkeys(converted, item["name"]))
-                components.append(
-                    {
-                        **item,
-                        "status": "unverified",
-                        "reason": "Native prompt prepared without source preapproval. Verify target behavior.",
-                    }
-                )
-            continue
-        destination = Path(target) / "home" / SKILL_ROOTS[target] / f"{plugin}-{path.parent.name}"
-        converted_skill = convert_skill(path, destination.name, target)
-        if converted_skill is None:
-            components.append(
-                {
-                    **item,
-                    "status": "blocked",
-                    "reason": "Skill name, metadata, or plugin-root references require target adaptation.",
-                }
-            )
-            continue
-        resources, executable_resources = skill_files(path.parent, destination)
-        resources[str(destination / "SKILL.md")] = converted_skill
-        resources.update(skill_policy(path, destination, target))
+        resources, executable_resources, diagnostics = portable_component(item, target, plugin)
+        collisions = sorted(files.keys() & resources.keys())
+        if collisions:
+            msg = f"Native output collision for {item['name']}: {', '.join(collisions)}. Select one source."
+            raise ValueError(msg)
         files.update(resources)
         owners.update(dict.fromkeys(resources, item["name"]))
         executables.extend(executable_resources)
-        components.extend(runtime_dependencies(item, resources))
-        components.append(
-            {
-                **item,
-                "status": "unverified",
-                "reason": "No source preapproval is transferred. Target permissions apply. Verify behavior.",
-            }
-        )
+        components.extend(diagnostics)
     components.extend(rewrite_skill_links(files, inventory, plugin, target, selected))
     owners, executables, components = retained_resources(files, owners, executables, components)
     if not selected and not manifest.get("standalone"):
@@ -108,7 +74,113 @@ def preview(
     }, files
 
 
-def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes] | None:
+class PromptBlockerError(ValueError):
+    """An unsupported source requirement that blocks only its component."""
+
+
+def portable_component(item: dict, target: str, plugin: str) -> tuple[dict, list, list]:
+    """Plan one prompt and preserve independent components when it is unsupported."""
+    path = Path(item["path"])
+    executables = []
+    try:
+        if item["kind"] == "command":
+            resources = command_file(path, target, plugin)
+            reason = "Native prompt prepared without source preapproval. Verify target behavior."
+            if target == "codex" and "_" in path.stem:
+                reason += f" Invoke as {plugin}-{path.stem.replace('_', '-')} in Codex."
+        else:
+            destination = Path(target) / "home" / SKILL_ROOTS[target] / f"{plugin}-{path.parent.name}"
+            converted = convert_skill(path, destination.name, target)
+            resources, executables = skill_files(path.parent, destination)
+            resources[str(destination / "SKILL.md")] = converted
+            resources.update(skill_policy(path, destination, target))
+            reason = "No source preapproval is transferred. Target permissions apply. Verify behavior."
+    except PromptBlockerError as error:
+        return (
+            {},
+            [],
+            [{**item, "status": "blocked", "reason": f"{path}: {error} Adapt this component before migration."}],
+        )
+    diagnostics = runtime_dependencies(item, resources)
+    diagnostics.append({**item, "status": "unverified", "reason": reason})
+    return resources, executables, diagnostics
+
+
+def prompt_document(path: Path, kind: str) -> tuple[dict, str]:
+    """Parse prompt frontmatter and report unsupported source requirements."""
+    content = path.read_bytes()
+    reject_sensitive(path, content)
+    text = content.decode("utf-8")
+    context_syntax(text)
+    metadata = {}
+    body = text
+    if text.startswith("---\n"):
+        header, separator, body = text[4:].partition("\n---\n")
+        if not separator:
+            msg = "Invalid frontmatter: closing delimiter is missing."
+            raise PromptBlockerError(msg)
+        metadata = read_yaml(header)
+    elif kind == "skill":
+        msg = "Skill frontmatter is missing."
+        raise PromptBlockerError(msg)
+    return validate_prompt_metadata(metadata, kind), body
+
+
+def validate_prompt_metadata(metadata: object, kind: str) -> dict:
+    """Check the fields that the target prompt conversion can preserve."""
+    if not isinstance(metadata, dict):
+        msg = "Frontmatter must be a mapping."
+        raise PromptBlockerError(msg)
+    allowed = {"description", "argument-hint", "allowed-tools", "disable-model-invocation"}
+    allowed |= {"name", "license", "metadata", "compatibility", "version"} if kind == "skill" else set()
+    if any(not isinstance(key, str) for key in metadata):
+        msg = "frontmatter-keys: field names must be strings."
+        raise PromptBlockerError(msg)
+    unsupported = set(metadata) - allowed
+    if unsupported:
+        msg = f"Unsupported {kind} fields: " + ", ".join(sorted(unsupported))
+        raise PromptBlockerError(msg)
+    if not isinstance(metadata.get("disable-model-invocation", False), bool):
+        msg = "disable-model-invocation must be a boolean."
+        raise PromptBlockerError(msg)
+    if kind == "skill":
+        description = metadata.get("description")
+        if not isinstance(description, str) or not description.strip():
+            msg = "description must be a nonempty string."
+            raise PromptBlockerError(msg)
+        if not isinstance(metadata.get("metadata", {}), dict):
+            msg = "metadata must be a mapping."
+            raise PromptBlockerError(msg)
+    return metadata
+
+
+def context_syntax(text: str) -> None:
+    """Keep source context execution and runtime-root references blocked."""
+    if "!`" in text:
+        msg = "inline-context-execution: !` is not evaluated by this converter."
+        raise PromptBlockerError(msg)
+    if "CLAUDE_PLUGIN_ROOT" in text:
+        msg = "plugin-root-reference: CLAUDE_PLUGIN_ROOT requires resource or runtime relocation."
+        raise PromptBlockerError(msg)
+
+
+def command_syntax(text: str, body: str, target: str) -> None:
+    """Reject command-only attachment and unmapped substitution semantics."""
+    without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
+    if re.search(r"(?<![A-Za-z0-9])@(?:[./~]|[A-Za-z0-9_-]+/)", text):
+        msg = "attachment-reference: @path requires target attachment semantics."
+        raise PromptBlockerError(msg)
+    if re.search(r"\$\{?[A-Za-z_][A-Za-z0-9_]*", without_arguments):
+        msg = "unmapped-variable: named $variables require target template review."
+        raise PromptBlockerError(msg)
+    if (target == "ampcode" and re.search(r"\$[1-9]", body)) or (
+        target == "codex" and re.search(r"\$(?:ARGUMENTS\b|[1-9])", body)
+    ):
+        msg = "native-arguments-unavailable: positional or $ARGUMENTS substitution is not supported."
+        raise PromptBlockerError(msg)
+
+
+def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes]:
     """Translate plain Markdown commands without execution semantics."""
     roots = {
         "opencode-v2": ".config/opencode/commands",
@@ -116,48 +188,22 @@ def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes] | Non
         "codex": ".agents/skills",
         "ampcode": ".config/amp/plugins",
     }
-    content = path.read_bytes()
-    reject_sensitive(path, content)
-    text = content.decode("utf-8")
-    metadata = {}
-    body = text
-    if text.startswith("---\n"):
-        header, separator, body = text[4:].partition("\n---\n")
-        if not separator:
-            return None
-        metadata = read_yaml(header)
-    if (
-        not isinstance(metadata, dict)
-        or set(metadata)
-        - {
-            "description",
-            "argument-hint",
-            "allowed-tools",
-            "disable-model-invocation",
-        }
-        or not isinstance(metadata.get("disable-model-invocation", False), bool)
-    ):
-        return None
+    metadata, body = prompt_document(path, "command")
     metadata = {
         key: value for key, value in metadata.items() if key not in {"allowed-tools", "disable-model-invocation"}
     }
     parser = yaml_parser()
     text = "---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body
-    without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
-    if (
-        any(token in text for token in ("!`", "CLAUDE_PLUGIN_ROOT"))
-        or re.search(r"(?<![A-Za-z0-9])@(?:[./~]|[A-Za-z0-9_-]+/)", text)
-        or re.search(r"\$\{?[A-Za-z_][A-Za-z0-9_]*", without_arguments)
-    ) or (
-        (target == "ampcode" and re.search(r"\$[1-9]", body))
-        or (target == "codex" and re.search(r"\$(?:ARGUMENTS\b|[1-9])", body))
-    ):
-        return None
+    command_syntax(text, body, target)
     if target == "ampcode":
         name, content = amp_command(plugin, path.stem, metadata, body)
         return {name: content}
     if target == "codex":
-        return codex_command(plugin, path.stem, metadata, body) if valid_skill_name(f"{plugin}-{path.stem}") else None
+        alias = path.stem.replace("_", "-")
+        if not valid_skill_name(f"{plugin}-{alias}"):
+            msg = f"invalid-native-identifier: {plugin}-{alias} does not meet Codex skill name rules."
+            raise PromptBlockerError(msg)
+        return codex_command(plugin, alias, metadata, body)
     destination = Path(target) / "home" / roots[target] / f"{plugin}-{path.stem}.md"
     return {str(destination): text.encode()}
 
@@ -185,39 +231,16 @@ def skill_files(source: Path, destination: Path) -> tuple[dict[str, bytes], list
     return files, executables
 
 
-def convert_skill(path: Path, name: str, target: str = "pi") -> bytes | None:
+def convert_skill(path: Path, name: str, target: str = "pi") -> bytes:
     """Validate and namespace portable skill content in one pass."""
-    content = path.read_bytes()
-    reject_sensitive(path, content)
-    text = content.decode("utf-8")
-    if not valid_skill_name(name) or "CLAUDE_PLUGIN_ROOT" in text or "!`" in text or not text.startswith("---\n"):
-        return None
-    header, separator, body = text[4:].partition("\n---\n")
-    if not separator:
-        return None
-    metadata = read_yaml(header)
-    if not isinstance(metadata, dict) or set(metadata) - {
-        "name",
-        "description",
-        "license",
-        "metadata",
-        "compatibility",
-        "version",
-        "allowed-tools",
-        "disable-model-invocation",
-        "argument-hint",
-    }:
-        return None
-    description = metadata.get("description")
+    metadata, body = prompt_document(path, "skill")
+    if not valid_skill_name(name):
+        msg = f"invalid-native-identifier: {name} does not meet native skill name rules."
+        raise PromptBlockerError(msg)
     manual = metadata.get("disable-model-invocation", False)
-    if (
-        not isinstance(description, str)
-        or not description.strip()
-        or not isinstance(manual, bool)
-        or (manual and target == "ampcode")
-        or not isinstance(metadata.get("metadata", {}), dict)
-    ):
-        return None
+    if manual and target == "ampcode":
+        msg = "manual-invocation-policy-unavailable: Amp has no verified explicit-only skill policy."
+        raise PromptBlockerError(msg)
     metadata = {
         key: value
         for key, value in metadata.items()
@@ -226,14 +249,10 @@ def convert_skill(path: Path, name: str, target: str = "pi") -> bytes | None:
     if manual and target == "pi":
         metadata["disable-model-invocation"] = True
     if manual and target == "opencode-v2":
-        descriptive = metadata.get("metadata", {})
-        if isinstance(descriptive, dict):
-            metadata["metadata"] = {**descriptive, "opencode/autoinvoke": False}
+        metadata["metadata"] = {**metadata.get("metadata", {}), "opencode/autoinvoke": False}
     metadata["name"] = name
     if "version" in metadata:
         descriptive = metadata.get("metadata", {})
-        if not isinstance(descriptive, dict):
-            return None
         metadata["metadata"] = {**descriptive, "source-version": str(metadata.pop("version"))}
     parser = yaml_parser()
     return ("---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body).encode()

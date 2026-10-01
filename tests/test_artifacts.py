@@ -675,3 +675,25 @@ def test_user_regeneration_cannot_delete_through_owned_directory_symlink(tmp_pat
     with pytest.raises(ValueError, match="symlink"):
         apply(root, {**report, "owners": {}}, {})
     assert (backup / "old.txt").read_bytes() == b"same bytes"
+
+
+def test_user_separate_command_selections_cannot_take_over_sibling_outputs(tmp_path) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given a generated command and a second source ID that maps to its native directory.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/clean-gone.md").write_text("Reply FIRST.\n", encoding="utf-8")
+    (source / "commands/clean_gone.md").write_text("Reply SECOND.\n", encoding="utf-8")
+    root = tmp_path / "output"
+    report, files = preview(source, "codex", ["sample:clean-gone"])
+    apply(root, report, files)
+    original = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    # When a separate selection aliases to the retained component, reject before changing any file.
+    report, files = preview(source, "codex", ["sample:clean_gone"])
+    with pytest.raises(ValueError, match="retained component"):
+        apply(root, report, files)
+    assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
