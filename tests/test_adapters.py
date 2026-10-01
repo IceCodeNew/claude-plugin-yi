@@ -1452,3 +1452,87 @@ def test_user_amp_arguments_prefix_is_not_mistaken_for_literal_local_variable(tm
     report, files = preview(source, "ampcode")
     assert not files
     assert report["components"][0]["status"] == "blocked"
+
+
+@pytest.mark.parametrize("encoding", ["crlf", "bom", "bom-crlf"])
+@pytest.mark.parametrize("kind", ["command", "skill"])
+def test_user_prompt_encoding_cannot_bypass_frontmatter_requirements(tmp_path, encoding, kind) -> None:
+    from yi.adapters import preview
+
+    # Given encoded frontmatter with an unsupported model requirement.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    path = source / ("skills/check/SKILL.md" if kind == "skill" else "commands/check.md")
+    path.parent.mkdir(parents=True)
+    content = "---\ndescription: Inspect\nmodel: opus\n---\nInspect.\n"
+    if "crlf" in encoding:
+        content = content.replace("\n", "\r\n")
+    path.write_bytes(("\ufeff" if "bom" in encoding else "").encode() + content.encode())
+    # When converted, unsupported metadata stays blocked and names the actual rejected field.
+    report, files = preview(source, "codex")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
+    assert "model" in report["components"][0]["reason"]
+
+
+@pytest.mark.parametrize("encoding", ["crlf", "bom", "bom-crlf"])
+def test_user_encoded_manual_skill_retains_explicit_codex_policy(tmp_path, encoding) -> None:
+    from yi.adapters import preview
+
+    # Given a portable manual-only skill saved by an editor using BOM or Windows line endings.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/check/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    content = "---\ndescription: Inspect\ndisable-model-invocation: true\n---\nInspect.\n"
+    if "crlf" in encoding:
+        content = content.replace("\n", "\r\n")
+    skill.write_bytes(("\ufeff" if "bom" in encoding else "").encode() + content.encode())
+    # When converted, parsed source policy must also control the emitted sidecar.
+    _report, files = preview(source, "codex")
+    assert files["codex/home/.agents/skills/sample-check/SKILL.md"].endswith(b"Inspect.\n")
+    assert b"allow_implicit_invocation: false" in files["codex/home/.agents/skills/sample-check/agents/openai.yaml"]
+
+
+@pytest.mark.parametrize("description", ['description: ""\n', "description: null\n", "description: '   '\n"])
+def test_user_codex_command_without_usable_description_gets_native_fallback(tmp_path, description) -> None:
+    import yaml
+
+    from yi.adapters import preview
+
+    # Given a plain command with an explicit empty description that Codex cannot discover as a skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text("---\n" + description + "---\nReply RECEIPT.\n", encoding="utf-8")
+    # When mapped to a native skill, supply a useful fallback while preserving command instructions.
+    _report, files = preview(source, "codex")
+    text = files["codex/home/.agents/skills/sample-check/SKILL.md"].decode()
+    metadata = yaml.safe_load(text.split("---", 2)[1])
+    assert metadata["description"] == "Run check explicitly."
+    assert text.endswith("Reply RECEIPT.\n")
+
+
+@pytest.mark.parametrize("target", ["codex", "opencode-v2"])
+def test_user_agent_runtime_root_dependency_is_not_silently_dropped(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given an agent whose required resource uses the source harness plugin root.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\ndescription: Review\n---\nRead ${CLAUDE_PLUGIN_ROOT}/scripts/check.py.\n", encoding="utf-8"
+    )
+    (source / "agents/portable.md").write_text("---\ndescription: Portable\n---\nReview text.\n", encoding="utf-8")
+    # When planned, isolate the dependency blocker rather than generate a broken native agent.
+    report, files = preview(source, target)
+    blocked = next(item for item in report["components"] if item["name"] == "sample:agent:reviewer")
+    assert blocked["status"] == "blocked"
+    assert "plugin-root-reference" in blocked["reason"]
+    assert not any("sample-reviewer" in path for path in files)
+    assert any("sample-portable" in path for path in files)

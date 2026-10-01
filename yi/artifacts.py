@@ -200,6 +200,7 @@ def merge_manifest(prior: dict, report: dict, files: dict[str, bytes]) -> dict:
 def protect_dependencies(root: Path, prior: dict, payload: dict, removed: set[str], files: dict) -> None:
     """Reject partial updates that remove a retained skill's generated sibling."""
     skill_root = Path(payload["target"]) / "home" / SKILL_ROOTS[payload["target"]]
+    skill_owners = {item.get("name") for item in payload["components"] if item.get("kind") == "skill"}
     for name in prior.get("hashes", {}).keys() - files.keys():
         path = Path(name)
         if path.name != "SKILL.md" or path.parent.parent != skill_root or name not in payload["hashes"]:
@@ -210,7 +211,13 @@ def protect_dependencies(root: Path, prior: dict, payload: dict, removed: set[st
         text = (root / path).read_text(encoding="utf-8")
         for sibling in re.findall(r"\.\./([^/\s]+)/SKILL\.md", text):
             dependency = str(skill_root / sibling / "SKILL.md")
-            if dependency in removed or prior.get("owners", {}).get(dependency) != payload["owners"].get(dependency):
+            if dependency in removed or (
+                dependency in prior.get("owners", {})
+                and (
+                    prior["owners"][dependency] != payload["owners"].get(dependency)
+                    or payload["owners"].get(dependency) not in skill_owners
+                )
+            ):
                 msg = f"Cannot replace retained skill dependency {dependency}, used by {name}. Select all components."
                 raise ValueError(msg)
 

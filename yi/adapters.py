@@ -111,7 +111,7 @@ def prompt_document(path: Path, kind: str) -> tuple[dict, str]:
     """Parse prompt frontmatter and report unsupported source requirements."""
     content = path.read_bytes()
     reject_sensitive(path, content)
-    text = content.decode("utf-8")
+    text = content.decode("utf-8-sig").replace("\r\n", "\n")
     context_syntax(text)
     metadata = {}
     body = text
@@ -393,7 +393,10 @@ def codex_command(plugin: str, name: str, metadata: dict, body: str) -> dict[str
     identifier = f"{plugin}-{name}"
     destination = f"codex/home/.agents/skills/{identifier}"
     parser = yaml_parser()
-    header = {"name": identifier, "description": metadata.get("description", f"Run {name} explicitly.")}
+    description = metadata.get("description")
+    if not isinstance(description, str) or not description.strip():
+        description = f"Run {name} explicitly."
+    header = {"name": identifier, "description": description}
     return {
         f"{destination}/SKILL.md": ("---\n" + parser.safe_dump(header) + "---\n" + body).encode(),
         f"{destination}/agents/openai.yaml": b"policy:\n  allow_implicit_invocation: false\n",
@@ -404,9 +407,8 @@ def skill_policy(path: Path, destination: Path, target: str) -> dict[str, bytes]
     """Emit target sidecars for explicit-only source skills."""
     if target != "codex":
         return {}
-    header = path.read_text(encoding="utf-8")[4:].partition("\n---\n")[0]
-    metadata = read_yaml(header)
-    if isinstance(metadata, dict) and metadata.get("disable-model-invocation") is True:
+    metadata, _body = prompt_document(path, "skill")
+    if metadata.get("disable-model-invocation") is True:
         sidecar = path.parent / "agents/openai.yaml"
         existing = read_yaml(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
         if not isinstance(existing, dict):

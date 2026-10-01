@@ -123,6 +123,15 @@ def agent_files(
             metadata = read_yaml(header) if separator else {}
             name = f"{manifest['name']}-{path.stem}"
             item = {"name": f"{manifest['name']}:agent:{path.stem}", "kind": "agent", "path": str(path)}
+            if "CLAUDE_PLUGIN_ROOT" in text:
+                diagnostics.append(
+                    {
+                        **item,
+                        "status": "blocked",
+                        "reason": "plugin-root-reference: relocate required resources before migrating this agent.",
+                    }
+                )
+                continue
             source_model = metadata.get("model") if isinstance(metadata, dict) else None
             mapped_model = (model_mapping or {}).get(source_model) if isinstance(source_model, str) else None
             if (

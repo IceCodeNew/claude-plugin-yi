@@ -699,7 +699,7 @@ def test_user_separate_command_selections_cannot_take_over_sibling_outputs(tmp_p
     assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
-@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("replacement", ["removed", "alias", "same-id-command"])
 def test_user_partial_regeneration_preserves_retained_skill_dependencies(tmp_path, replacement) -> None:
     from yi.adapters import preview
     from yi.artifacts import apply
@@ -721,10 +721,14 @@ def test_user_partial_regeneration_preserves_retained_skill_dependencies(tmp_pat
     original = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
     # When updating selected components, refuse removal or takeover of a retained dependency.
     selected = ["sample:clean-gone"]
-    if replacement:
+    if replacement != "removed":
         (source / "commands").mkdir()
-        (source / "commands/clean_gone.md").write_text("Reply COMMAND instead.\n", encoding="utf-8")
-        selected.append("sample:clean_gone")
+        command = "clean_gone" if replacement == "alias" else "clean-gone"
+        (source / f"commands/{command}.md").write_text("Reply COMMAND instead.\n", encoding="utf-8")
+        if replacement == "alias":
+            selected.append("sample:clean_gone")
+        else:
+            (source / "skills/clean-gone/SKILL.md").unlink()
     report, files = preview(source, "codex", selected)
     with pytest.raises(ValueError, match=r"retained.*dependency"):
         apply(root, report, files)
