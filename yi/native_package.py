@@ -1,5 +1,6 @@
 """Stage upstream native packages without activation or source execution."""
 
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -100,18 +101,154 @@ def native_entrypoints(source: Path, target: str) -> list[str]:
     if path.is_file():
         package = read_object(path)
         if target == "pi" and isinstance(package.get("pi"), dict):
-            entries = package["pi"].get("extensions", [])
-            for key in ("skills", "prompts", "themes"):
-                validate_entries(source, package["pi"].get(key, []))
-        elif target == "opencode-v2" and isinstance(package.get("main"), str):
-            entries = [package["main"]]
-        else:
-            entries = []
+            pi_resources(source, package["pi"])
+            return ["package.json"]
+        entries = [package["main"]] if target == "opencode-v2" and isinstance(package.get("main"), str) else []
         if entries and isinstance(entries, list):
             validate_entries(source, entries)
             return entries
     msg = f"No upstream native package declaration for {target}."
     raise ValueError(msg)
+
+
+def pi_resources(source: Path, declarations: dict) -> list[str]:
+    """Resolve a bounded native resource inventory while preserving manifest bytes."""
+    resources = []
+    for kind in ("extensions", "skills", "prompts", "themes"):
+        entries = declarations.get(kind, [])
+        if not isinstance(entries, list):
+            msg = "Native resource declarations must be path arrays."
+            raise TypeError(msg)
+        patterns = [(entry, pi_resource_pattern(entry)) for entry in entries]
+        discovered = set()
+        for entry, pattern in patterns:
+            if entry[0] in "!+-":
+                continue
+            wildcard = "*" in pattern or "?" in pattern
+            matches = sorted(source.glob(pattern)) if wildcard else [source / pattern]
+            if not matches or any(not path.exists() for path in matches):
+                msg = f"Native resource is missing: {entry}"
+                raise ValueError(msg)
+            for path in matches:
+                if wildcard and any(part.startswith(".") for part in path.relative_to(source).parts):
+                    continue
+                validate_pi_path(source, path)
+                discovered.update(pi_resource_files(source, path, kind))
+        for resource in sorted(discovered):
+            relative = str(resource.relative_to(source))
+            if pi_resource_selected(resource, source, patterns):
+                resources.append(relative)
+    return sorted(set(resources))
+
+
+def pi_resource_selected(resource: Path, source: Path, patterns: list[tuple[str, str]]) -> bool:
+    """Apply exclusion, exact reinclude, then exact exclusion without changing discovery."""
+    relative = str(resource.relative_to(source))
+    candidates = [relative, resource.name]
+    exact = [relative]
+    if resource.name == "SKILL.md":
+        candidates.extend([str(resource.parent.relative_to(source)), resource.parent.name])
+        exact.append(str(resource.parent.relative_to(source)))
+    excluded = any(
+        entry.startswith("!") and any(pi_glob_match(value, pattern) for value in candidates)
+        for entry, pattern in patterns
+    )
+    included = any(entry.startswith("+") and pattern.removeprefix("./") in exact for entry, pattern in patterns)
+    removed = any(entry.startswith("-") and pattern.removeprefix("./") in exact for entry, pattern in patterns)
+    return not removed and (not excluded or included)
+
+
+def validate_pi_path(source: Path, path: Path) -> None:
+    """Require resolved resource paths to remain contained and not follow links."""
+    if any(parent.is_symlink() for parent in (path, *path.parents) if parent.is_relative_to(source)):
+        msg = f"Native resource follows a symlink: {path}"
+        raise ValueError(msg)
+    if not path.resolve().is_relative_to(source):
+        msg = "Native resource must remain inside its package."
+        raise ValueError(msg)
+
+
+def pi_glob_match(value: str, pattern: str) -> bool:
+    """Match supported glob components without allowing wildcards across path separators."""
+    values, patterns = value.split("/"), pattern.removeprefix("./").split("/")
+    return len(values) == len(patterns) and all(
+        (not item.startswith(".") or part.startswith(".")) and fnmatch.fnmatchcase(item, part)
+        for item, part in zip(values, patterns, strict=True)
+    )
+
+
+def pi_resource_files(source: Path, path: Path, kind: str, *, skill_root: bool = True) -> set[Path]:
+    """Collect bounded native resources and refuse indirect declarations or ignored trees."""
+    if path.is_file():
+        return {path}
+    if any((path / name).exists() for name in (".gitignore", ".ignore", ".fdignore")):
+        msg = f"Native resource ignore files require review: {path}"
+        raise ValueError(msg)
+    if kind == "extensions":
+        return pi_extension_files(source, path)
+    if kind == "skills" and (path / "SKILL.md").is_file():
+        return {path / "SKILL.md"}
+    patterns = {"skills": ".md", "prompts": ".md", "themes": ".json"}
+    resources = set()
+    for child in path.iterdir():
+        if child.name.startswith(".") or child.name == "node_modules":
+            continue
+        validate_pi_path(source, child)
+        if child.is_dir():
+            resources.update(pi_resource_files(source, child, kind, skill_root=False))
+        elif child.is_file() and child.suffix == patterns[kind] and (kind != "skills" or skill_root):
+            resources.add(child)
+    return resources
+
+
+def pi_extension_files(source: Path, path: Path) -> set[Path]:
+    """Preserve Pi index precedence and reject nested runtime-entry declarations."""
+    manifest = path / "package.json"
+    if (
+        manifest.is_file()
+        and isinstance((package := read_object(manifest)).get("pi"), dict)
+        and package["pi"].get("extensions")
+    ):
+        msg = f"Nested extension package declarations require review: {path}"
+        raise ValueError(msg)
+    for name in ("index.ts", "index.js"):
+        if (path / name).is_file():
+            return {path / name}
+    resources = set()
+    for child in path.iterdir():
+        if child.name.startswith(".") or child.name == "node_modules":
+            continue
+        validate_pi_path(source, child)
+        if child.is_file() and child.suffix in {".ts", ".js"}:
+            resources.add(child)
+        elif child.is_dir():
+            nested = child / "package.json"
+            if (
+                nested.is_file()
+                and isinstance((package := read_object(nested)).get("pi"), dict)
+                and package["pi"].get("extensions")
+            ):
+                msg = f"Nested extension package declarations require review: {child}"
+                raise ValueError(msg)
+            index = next((child / name for name in ("index.ts", "index.js") if (child / name).is_file()), None)
+            if index:
+                resources.add(index)
+    return resources
+
+
+def pi_resource_pattern(entry: object) -> str:
+    """Reject escaping declarations and unsupported glob syntax before expansion."""
+    if not isinstance(entry, str) or not entry:
+        msg = "Native resource declarations require nonempty path strings."
+        raise ValueError(msg)
+    pattern = entry[1:] if entry[0] in "!+-" else entry
+    if Path(pattern).is_absolute() or ".." in Path(pattern).parts or EXCLUDED.intersection(Path(pattern).parts):
+        msg = "Native resource must remain inside its package."
+        raise ValueError(msg)
+    if "**" in pattern or not re.fullmatch(r"[A-Za-z0-9_./*?+-]+", pattern):
+        msg = f"Unsupported native resource glob syntax: {entry}. Review this declaration."
+        raise ValueError(msg)
+    return pattern
 
 
 def validate_entries(source: Path, entries: list[str]) -> None:
@@ -146,6 +283,13 @@ def verify_declared_resources(source: Path, destination: Path, target: str, file
     path = source / (".codex-plugin/plugin.json" if target == "codex" else "package.json")
     document = json.loads(path.read_text(encoding="utf-8"))
     declarations = document if target == "codex" else document.get("pi", {}) if target == "pi" else {}
+    if target == "pi":
+        for entry in pi_resources(source, declarations):
+            staged = str(destination / entry)
+            if not any(name == staged or name.startswith(staged.rstrip("/") + "/") for name in files):
+                msg = f"Native declared resource was excluded: {entry}"
+                raise ValueError(msg)
+        return
     for key in ("skills", "hooks", "mcpServers", "agents", "commands", "prompts", "themes"):
         value = declarations.get(key)
         entries = [value] if isinstance(value, str) else value if isinstance(value, list) else []

@@ -37,7 +37,7 @@ Migration requires PyYAML. When it is absent, run the helper through `uv run --n
 
 ## Upstream native packages
 
-Use `--native-package` to stage an existing target-native package without activation. yi preserves its relative layout outside discovery roots. Register it only after review. Do not activate both its original skills and duplicate converted skills. Preserve license notices and keep credentials outside artifacts.
+Use `--native-package` to stage an existing target-native package without activation. yi preserves its relative layout outside discovery roots. Pi packages can declare independent skills, prompts, themes, or extensions using contained exact paths, directories, and supported single-level `*`/`?` patterns. Original filter declarations remain unchanged. Advanced globs, resource ignore files, and nested extension entry declarations require review. Register packages only after review. Do not activate both their original skills and duplicate converted skills. Preserve license notices and keep credentials outside artifacts.
 
 ## Development
 

@@ -367,3 +367,111 @@ def test_user_native_inline_wrapper_named_server_cannot_export_credentials(tmp_p
     # When staging, server names must not change credential validation semantics.
     with pytest.raises(ValueError, match="credential"):
         preview(source, "pi")
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"extensions": ["extensions"]},
+        {"skills": ["skills"]},
+        {"prompts": ["prompts/*.md", "!prompts/excluded.md"]},
+    ],
+)
+def test_user_stages_pi_resource_only_directories_and_globs_inertly(tmp_path, declaration) -> None:
+    from yi.native_package import preview
+
+    # Given a valid Pi package declaration using native directory/glob resource syntax, without requiring extensions.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "package.json").write_text(json.dumps({"pi": declaration}), encoding="utf-8")
+    (source / "extensions").mkdir()
+    (source / "extensions/start.ts").write_text("export default function() {}\n", encoding="utf-8")
+    (source / "skills/check").mkdir(parents=True)
+    (source / "skills/check/SKILL.md").write_text("---\ndescription: Check\n---\nRead text.\n", encoding="utf-8")
+    (source / "prompts").mkdir()
+    (source / "prompts/receipt.md").write_text("Reply RECEIPT.\n", encoding="utf-8")
+    (source / "prompts/excluded.md").write_text("Inactive retained source example.\n", encoding="utf-8")
+    original = (source / "package.json").read_bytes()
+    # When staged, preserve the original manifest and layout without registering or executing any resource.
+    report, files = preview(source, "pi")
+    assert report["activation"] == "not-registered"
+    assert files["pi/home/.local/share/yi/packages/sample/package.json"] == original
+    assert "pi/home/.local/share/yi/packages/sample/prompts/receipt.md" in files
+    assert not any(".pi/agent/extensions" in path for path in files)
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_user_pi_glob_validation_uses_actual_prompt_inventory(tmp_path, filtered) -> None:
+    from yi.native_package import preview
+
+    # Given a prompt glob with hidden/empty/non-prompt paths and an optional excluded log.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    entries = ["prompts/*"] + (["!prompts/debug.log"] if filtered else [])
+    (source / "package.json").write_text(json.dumps({"pi": {"prompts": entries}}), encoding="utf-8")
+    (source / "prompts/empty").mkdir(parents=True)
+    (source / "prompts/.empty").mkdir()
+    (source / "prompts/receipt.md").write_text("Reply RECEIPT.\n", encoding="utf-8")
+    (source / "prompts/.hidden.log").write_text("Hidden log.\n", encoding="utf-8")
+    if filtered:
+        (source / "prompts/debug.log").write_text("Explicitly filtered native file.\n", encoding="utf-8")
+    # When staged, require only Pi's effective prompt resources, not every raw filesystem match.
+    report, files = preview(source, "pi")
+    assert report["activation"] == "not-registered"
+    assert "pi/home/.local/share/yi/packages/sample/prompts/receipt.md" in files
+
+
+@pytest.mark.parametrize("entry", ["../../../outside.ts", "start.log"])
+def test_user_pi_nested_extension_declarations_require_review(tmp_path, entry) -> None:
+    from yi.native_package import preview
+
+    # Given a nested extension package that redirects native entrypoint resolution.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "package.json").write_text('{"pi":{"extensions":["extensions"]}}', encoding="utf-8")
+    (source / "extensions/sub").mkdir(parents=True)
+    (source / "extensions/sub/package.json").write_text(json.dumps({"pi": {"extensions": [entry]}}), encoding="utf-8")
+    (source / "extensions/sub/start.log").write_text("Inert entry.\n", encoding="utf-8")
+    (tmp_path / "outside.ts").write_text("export default function() {}\n", encoding="utf-8")
+    # When staging, block indirect declarations rather than assume directory presence proves containment.
+    with pytest.raises(ValueError, match=r"nested|Nested"):
+        preview(source, "pi")
+
+
+@pytest.mark.parametrize("restore", [False, True])
+def test_user_pi_filter_precedence_preserves_only_effective_required_resources(tmp_path, restore) -> None:
+    from yi.native_package import preview
+
+    # Given a log-file declaration removed by exclusion and optionally reinstated by an exact plus rule.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    entries = ["prompts/*", "!prompts/debug.log"] + (["+prompts/debug.log"] if restore else [])
+    (source / "package.json").write_text(json.dumps({"pi": {"prompts": entries}}), encoding="utf-8")
+    (source / "prompts").mkdir()
+    (source / "prompts/debug.log").write_text("Inert native file omitted by copy policy.\n", encoding="utf-8")
+    (source / "prompts/receipt.md").write_text("Reply RECEIPT.\n", encoding="utf-8")
+    # When resolved, plus reinstatement must restore the survival obligation rather than bypass copy policy.
+    if restore:
+        with pytest.raises(ValueError, match="excluded"):
+            preview(source, "pi")
+    else:
+        _report, files = preview(source, "pi")
+        assert "pi/home/.local/share/yi/packages/sample/prompts/receipt.md" in files
+
+
+@pytest.mark.parametrize("pattern", ["prompts/**/*.md", "prompts/{a,b}*.md", "../outside.md", "/outside.md"])
+def test_user_pi_unsupported_or_escaping_glob_requires_explicit_review(tmp_path, pattern) -> None:
+    from yi.native_package import preview
+
+    # Given a declaration outside the supported contained single-level grammar.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "package.json").write_text(json.dumps({"pi": {"prompts": [pattern]}}), encoding="utf-8")
+    # When planned, fail clearly rather than claim the native-valid advanced pattern was resolved.
+    with pytest.raises(ValueError, match=r"Unsupported|inside"):
+        preview(source, "pi")
