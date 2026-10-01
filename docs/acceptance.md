@@ -1,5 +1,13 @@
 # Functional acceptance
 
+## Phase-one scope
+
+Phase one tests and improves the migration tool through representative real-plugin components; it does not require or claim complete plugin parity across every target. Retain unsupported components in inventory and reports rather than counting them as passes. LSP capabilities are excluded from migration and behavioral acceptance; their presence may still be reported as unsupported. Do not expand development merely to eliminate every source-plugin blocker.
+
+The delivery boundary defers required-model worker tests, source-runtime resource packaging, target upgrades and third-party integrations, semantic rewrites of source pre-render commands, target evaluator adapters, complete lifecycle enforcement, and unavailable external-service connectivity. Preserve exclusive tool restrictions, manual-only requirements, disabled-service controls, and source files. These deferrals do not permit automatic model substitution, permission grants, credential copying, or source execution.
+
+A blocker is an accepted phase-one limitation only when its evidence and affected component are identified. New converter defects remain failures to repair. Stack delivery requires clean exact-head audits and verification of each layer; the original cumulative draft PR remains open until the replacement stack is verified. No automatic merge is authorized.
+
 ## Required evidence
 
 Record the source commit, installed plugin path, target CLI version, exact operation, observed result, and remaining limitations. Separate installation, native resource discovery, prompt expansion, and model/tool behavior. A passing automated suite does not replace these checks.
