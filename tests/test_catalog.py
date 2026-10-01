@@ -289,6 +289,21 @@ def test_user_invalid_installation_registry_returns_structured_failure(tmp_path)
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize("kind", ["skills", "commands", "agents"])
+def test_user_missing_explicit_component_path_is_not_optional(tmp_path, kind) -> None:
+    from yi.adapters import preview
+
+    # Given a manifest whose explicit component path is absent.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text(
+        json.dumps({"name": "sample", kind: ["custom/missing"]}), encoding="utf-8"
+    )
+    # When planning, retain prior artifacts by failing before an empty replacement plan is applied.
+    with pytest.raises(ValueError, match="missing"):
+        preview(source, "codex")
+
+
 def test_user_malformed_install_entries_do_not_hide_valid_sources(tmp_path) -> None:
     # Given invalid rows beside a valid indexed plugin.
     root = tmp_path / "claude"
@@ -307,3 +322,17 @@ def test_user_malformed_install_entries_do_not_hide_valid_sources(tmp_path) -> N
     items = run_cli(tmp_path, "catalog", "--claude-dir", str(root), "--json")["items"]
     assert any(item["name"] == "good:check" for item in items)
     assert len([item for item in items if item.get("status") == "unresolved"]) == 4
+
+
+def test_user_standalone_source_with_claude_directory_does_not_require_registry(tmp_path) -> None:
+    # Given a standalone skill and a valid empty Claude directory without an installation index.
+    source = tmp_path / "standalone"
+    source.mkdir()
+    (source / "SKILL.md").write_text("---\ndescription: Inspect\n---\nRead text.\n", encoding="utf-8")
+    root = tmp_path / "claude"
+    root.mkdir()
+    # When migration also supplies the catalog scope, the standalone source remains resolvable.
+    result = run_cli(
+        tmp_path, "migrate", "--source", str(source), "--claude-dir", str(root), "--target", "pi", "--dry-run", "--json"
+    )
+    assert any(path.endswith("/SKILL.md") for path in result["files"])
