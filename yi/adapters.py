@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 from pathlib import Path
 
 from yi.catalog import checked_source, discover, source_manifest
@@ -164,20 +165,87 @@ def context_syntax(text: str) -> None:
         raise PromptBlockerError(msg)
 
 
-def command_syntax(text: str, body: str, target: str) -> None:
+def command_syntax(text: str, target: str) -> None:
     """Reject command-only attachment and unmapped substitution semantics."""
-    without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", text)
+    literal_checked = literal_shell_text(text)
+    if target in {"pi", "opencode-v2"} and len(re.findall(r"\$[1-9]", literal_checked)) != len(
+        re.findall(r"\$[1-9]", text)
+    ):
+        msg = "literal-template-collision: native argument expansion changes literal shell $1 fields."
+        raise PromptBlockerError(msg)
+    without_arguments = re.sub(r"\$(?:ARGUMENTS\b|[1-9](?![0-9]))", "", literal_checked)
     if re.search(r"(?<![A-Za-z0-9])@(?:[./~]|[A-Za-z0-9_-]+/)", text):
         msg = "attachment-reference: @path requires target attachment semantics."
         raise PromptBlockerError(msg)
     if re.search(r"\$\{?[A-Za-z_][A-Za-z0-9_]*", without_arguments):
         msg = "unmapped-variable: named $variables require target template review."
         raise PromptBlockerError(msg)
-    if (target == "ampcode" and re.search(r"\$[1-9]", body)) or (
-        target == "codex" and re.search(r"\$(?:ARGUMENTS\b|[1-9])", body)
+    if (target == "ampcode" and re.search(r"\$[1-9]", literal_checked)) or (
+        target == "codex" and re.search(r"\$(?:ARGUMENTS\b|[1-9])", literal_checked)
     ):
         msg = "native-arguments-unavailable: positional or $ARGUMENTS substitution is not supported."
         raise PromptBlockerError(msg)
+
+
+def literal_shell_text(text: str) -> str:
+    """Mask proven recipe-local references for validation, never for generated output."""
+    return re.sub(
+        r"(?m)^[ \t]*(`{3,})(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*`{3,}[ \t]*$",
+        mask_shell_recipe,
+        text,
+        flags=re.DOTALL,
+    )
+
+
+def shell_tokens(line: str) -> list[str] | None:
+    """Tokenize recipe lines without expanding or executing shell content."""
+    lexer = shlex.shlex(line, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def mask_shell_recipe(match: re.Match[str]) -> str:
+    """Keep unknown placeholders visible while recognizing bounded shell syntax."""
+    recipe = match[2]
+    parsed = [shell_tokens(line) for line in recipe.splitlines()]
+    if None in parsed:
+        return match[0]
+    tokens = [words for words in parsed if words is not None]
+    if any("<<" in word for words in tokens for word in words):
+        return match[0]
+    assigned = set()
+    for line, words in zip(recipe.splitlines(), tokens, strict=True):
+        assignment = re.fullmatch(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(.*)", line)
+        if assignment and (len(words) == 1 or (re.fullmatch(r"\$\([^()]*\)", assignment[2]) is not None)):
+            assigned.add(assignment[1])
+        for index, word in enumerate(words):
+            if word == "while" and (index == 0 or words[index - 1] in {"|", ";", "&&", "||"}):
+                tail = words[index + 1 :]
+                read = re.fullmatch(r"read (?:-r )?([A-Za-z_][A-Za-z0-9_]*)(?: ;.*)?", " ".join(tail))
+                if read:
+                    assigned.add(read[1])
+    assigned = {name for name in assigned if not name.startswith("ARGUMENTS")}
+    recipe = re.sub(
+        r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+        lambda variable: "literal" if (variable[1] or variable[2]) in assigned else variable[0],
+        recipe,
+    )
+    return "".join(
+        mask_awk_line(line, words) for line, words in zip(recipe.splitlines(keepends=True), tokens, strict=True)
+    )
+
+
+def mask_awk_line(line: str, words: list[str]) -> str:
+    """Mask only one unambiguous single-quoted awk program on a recipe line."""
+    for index, word in enumerate(words[:-1]):
+        if word == "awk" and (index == 0 or words[index - 1] in {"|", ";", "&&", "||"}):
+            program = words[index + 1]
+            if program.startswith("'") and program.endswith("'") and line.count(program) == 1:
+                line = line.replace(program, re.sub(r"\$[1-9](?![0-9])", "literal", program))
+    return line
 
 
 def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes]:
@@ -194,7 +262,7 @@ def command_file(path: Path, target: str, plugin: str) -> dict[str, bytes]:
     }
     parser = yaml_parser()
     text = "---\n" + parser.safe_dump(metadata, sort_keys=False) + "---\n" + body
-    command_syntax(text, body, target)
+    command_syntax(text, target)
     if target == "ampcode":
         name, content = amp_command(plugin, path.stem, metadata, body)
         return {name: content}

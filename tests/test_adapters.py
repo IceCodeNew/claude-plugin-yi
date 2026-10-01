@@ -1371,3 +1371,84 @@ def test_user_command_alias_cannot_impersonate_blocked_skill_dependency(tmp_path
     assert "codex/home/.agents/skills/sample-needs/SKILL.md" not in files
     assert set(report["owners"].values()) == {"sample:clean_gone"}
     assert any(item["name"] == "sample:needs" and item["kind"] == "skill-dependency" for item in report["components"])
+
+
+@pytest.mark.parametrize("target", ["codex", "ampcode", "pi", "opencode-v2"])
+def test_user_literal_shell_recipe_is_preserved_or_explicitly_blocked(tmp_path, target) -> None:
+    from yi.adapters import preview
+
+    # Given a non-executed recipe with locally defined variables and literal awk fields.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    body = (
+        "```bash\nwhile read branch; do\n"
+        "  worktree=$(printf '%s' \"$branch\" | awk '{print $1}')\n"
+        '  echo "$worktree"\ndone\n```\n'
+    )
+    (source / "commands/clean_gone.md").write_text("---\ndescription: Inspect recipe\n---\n" + body, encoding="utf-8")
+    # When migrated, only non-template target surfaces can preserve the literal recipe.
+    report, files = preview(source, target)
+    if target in {"pi", "opencode-v2"}:
+        assert not files
+        assert "literal-template-collision" in report["components"][0]["reason"]
+    elif target == "codex":
+        assert files["codex/home/.agents/skills/sample-clean-gone/SKILL.md"].endswith(body.encode())
+    else:
+        # The generated JavaScript string must decode to the unchanged user message.
+        text = files["ampcode/home/.config/amp/plugins/sample-clean_gone.js"].decode()
+        content = text.split("const content = ", 1)[1].split(";\n", 1)[0]
+        assert json.loads(content) == body
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```bash\nworktree=local\necho $ARGUMENTS\n```\n",
+        "```bash\nworktree=local\necho $unknown\n```\n",
+        "```bash\nworktree=local\n```\nUse $worktree outside its recipe.\n",
+        "```bash\nworktree=local\necho $1\n```\n",
+        "```bash\n# while read unknown; do\necho $unknown\n```\n",
+        '```bash\necho "while read unknown"\necho $unknown\n```\n',
+        "```bash\nunknown=local true\necho $unknown\n```\n",
+        "```bash\nunknown=$(printf x) true $(printf y)\necho $unknown\n```\n",
+        "```bash\ncat <<EOF\nunknown=local\nEOF\necho $unknown\n```\n",
+        "```bash\nwhile read branch-name; do :; done\necho $branch\n```\n",
+        '```bash\nprintf "%s" "\nunknown=local\n"\necho $unknown\n```\n',
+        "```bash\nprintf \"awk '{print $1}'\"\n```\n",
+        "```bash\nawk '{print $1}'\nprintf \"awk '{print $1}'\"\n```\n",
+        "```bash\nworktree=local\n````\nUse $worktree outside.\n```text\nExample.\n```\n",
+    ],
+)
+def test_user_literal_recipe_exemption_does_not_hide_real_template_requirements(tmp_path, body) -> None:
+    from yi.adapters import preview
+
+    # Given a recipe with a genuine or unproven placeholder, not a demonstrable local reference.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text(body, encoding="utf-8")
+    # When migrated to a Codex skill, do not pretend native argument binding is available.
+    report, files = preview(source, "codex")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
+
+
+def test_user_amp_arguments_prefix_is_not_mistaken_for_literal_local_variable(tmp_path) -> None:
+    from yi.adapters import preview
+
+    # Given a local variable name colliding with Amp's source argument placeholder prefix.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "commands").mkdir()
+    (source / "commands/check.md").write_text(
+        "```bash\nARGUMENTS_SUFFIX=local\necho $ARGUMENTS_SUFFIX\n```\n", encoding="utf-8"
+    )
+    # When mapped to an Amp message, block rather than opening a dialog that changes its literal name.
+    report, files = preview(source, "ampcode")
+    assert not files
+    assert report["components"][0]["status"] == "blocked"
