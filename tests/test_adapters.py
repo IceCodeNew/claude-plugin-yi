@@ -1842,3 +1842,36 @@ def test_user_command_dependency_cannot_hide_collision_with_its_required_skill(t
     # When planned, resolve the real skill before checking command overlap; do not misreport it as unavailable.
     with pytest.raises(ValueError, match="collision"):
         preview(source, "codex")
+
+
+@pytest.mark.parametrize("location", ["command", "skill", "example"])
+def test_user_invalid_utf8_blocks_only_the_affected_prompt_component(tmp_path, location) -> None:
+    from yi.adapters import preview
+
+    # Given a malformed prompt/example byte stream and an independent valid skill.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    portable = source / "skills/portable/SKILL.md"
+    portable.parent.mkdir(parents=True)
+    portable.write_text("---\ndescription: Portable\n---\nRead text.\n", encoding="utf-8")
+    if location == "skill":
+        bad = source / "skills/bad/SKILL.md"
+        bad.parent.mkdir(parents=True)
+        bad.write_bytes(b"---\ndescription: Bad\n---\n\xff")
+    else:
+        bad = source / "commands/bad.md"
+        bad.parent.mkdir(parents=True)
+        if location == "command":
+            bad.write_bytes(b"Bad \xff")
+        else:
+            bad.write_text("See `${CLAUDE_PLUGIN_ROOT}/examples/`.\n", encoding="utf-8")
+            (source / "examples").mkdir()
+            (source / "examples/note.md").write_bytes(b"Bad \xff")
+    # When previewed, identify UTF-8 adaptation for that component and retain independent output.
+    report, files = preview(source, "codex")
+    assert set(report["owners"].values()) == {"sample:portable"}
+    assert files
+    blocked = next(item for item in report["components"] if item["name"] == "sample:bad")
+    assert blocked["status"] == "blocked"
+    assert "UTF-8" in blocked["reason"]

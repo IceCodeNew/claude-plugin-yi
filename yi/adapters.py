@@ -149,12 +149,21 @@ def portable_component(item: dict, target: str, plugin: str, source: Path) -> tu
     return resources, executables, diagnostics
 
 
+def decode_prompt(content: bytes) -> str:
+    """Report invalid prompt encoding as one component's adaptation requirement."""
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        msg = "Prompt documents require valid UTF-8. Re-encode this source before migration."
+        raise PromptBlockerError(msg) from error
+
+
 def example_documents(source: Path, item: dict, target: str) -> tuple[str, dict[str, bytes]]:
     """Relocate the exact inert examples directory pointer without exporting runtime code."""
     path = Path(item["path"])
     content = path.read_bytes()
     reject_sensitive(path, content)
-    text = content.decode("utf-8-sig").replace("\r\n", "\n")
+    text = decode_prompt(content).replace("\r\n", "\n")
     pointer = "`${CLAUDE_PLUGIN_ROOT}/examples/`"
     if pointer not in text:
         return text, {}
@@ -181,7 +190,7 @@ def example_documents(source: Path, item: dict, target: str) -> tuple[str, dict[
             raise ValueError(msg)
         data = resource.read_bytes()
         reject_sensitive(resource, data)
-        data.decode("utf-8")
+        decode_prompt(data)
         files[str(Path(target) / "home" / native / resource.name)] = data
     if not files:
         msg = "document-resource: examples directory is empty."
@@ -214,7 +223,7 @@ def prompt_document(path: Path, kind: str, *, text: str | None = None) -> tuple[
     """Parse prompt frontmatter and report unsupported source requirements."""
     content = path.read_bytes()
     reject_sensitive(path, content)
-    text = (content.decode("utf-8-sig") if text is None else text).replace("\r\n", "\n")
+    text = (decode_prompt(content) if text is None else text).replace("\r\n", "\n")
     context_syntax(text)
     metadata = {}
     body = text
