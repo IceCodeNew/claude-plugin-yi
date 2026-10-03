@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -330,3 +331,46 @@ def test_permission_request_allow_does_not_grant_approval(tmp_path) -> None:
     output = json.loads(result.stdout)
     assert "hookSpecificOutput" not in output
     assert "not migrated" in output["systemMessage"]
+
+
+@pytest.mark.parametrize("declaration", ["inline", "custom"])
+def test_migration_does_not_publish_declared_mcp_credentials_in_hook_assets(tmp_path, declaration) -> None:
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / "hooks").mkdir()
+    servers = {"fixture": {"command": "fixture-server", "env": {"TOKEN": "not-a-real-secret-mcp-fixture"}}}
+    manifest = {"name": "demo", "mcpServers": servers if declaration == "inline" else "server-config.json"}
+    (source / ".claude-plugin/plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    if declaration == "custom":
+        (source / "server-config.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    (source / "hooks/hooks.json").write_text(
+        json.dumps(
+            {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "printf 'constant fixture output'"}]}]}}
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    result = subprocess.run(  # noqa: S603 - Public migration CLI with inert synthetic package.
+        [
+            sys.executable,
+            str(RUNTIME.parent.parent / "scripts/yi.py"),
+            "migrate",
+            "--source",
+            str(source),
+            "--target",
+            "codex",
+            "--output",
+            str(output),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+        env={**os.environ, "HOME": str(tmp_path / "home")},
+    )
+    copied = [path for path in output.rglob("*") if path.is_file()]
+    assert not any(b"not-a-real-secret-mcp-fixture" in path.read_bytes() for path in copied), result.stdout
+    if result.returncode == 0:
+        report = json.loads(result.stdout)
+        assert any(component["status"] == "blocked" for component in report["components"])

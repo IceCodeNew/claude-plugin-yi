@@ -647,6 +647,20 @@ def test_user_rejects_colliding_agent_destinations(tmp_path) -> None:
         preview(source, "codex")
 
 
+@pytest.mark.parametrize("path", ["codex/home/.codex/config.toml", "opencode-v2/home/.config/opencode/opencode.json"])
+def test_user_shared_mcp_names_cannot_collide(path) -> None:
+    from yi.shared_config import combine
+
+    # Given two independent contributions with an identical native MCP name.
+    if path.endswith("toml"):
+        pieces = ['[mcp_servers."a-b-c"]\ncommand="one"\n', '[mcp_servers."a-b-c"]\ncommand="two"\n']
+    else:
+        pieces = [json.dumps({"mcp": {"servers": {"a-b-c": {"command": [name]}}}}) for name in ("one", "two")]
+    # When composed, neither duplicate tables nor silent last-writer wins are allowed.
+    with pytest.raises(ValueError, match="collision"):
+        combine(path, pieces)
+
+
 def test_user_agent_declared_twice_is_converted_once(tmp_path) -> None:
     from yi.adapters import preview
 
@@ -986,6 +1000,39 @@ def test_user_portable_resource_with_claude_runtime_dependency_is_not_silent(tmp
     assert any(item["status"] == "blocked" and "Claude" in item["reason"] for item in report["components"])
 
 
+@pytest.mark.parametrize("target", ["codex", "opencode-v2"])
+@pytest.mark.parametrize("mapped", [False, True])
+def test_user_agent_inherits_model_without_literal_alias(tmp_path, target, mapped) -> None:
+    import tomllib
+
+    import yaml
+
+    # Given an agent that explicitly inherits the active model and has descriptive color metadata.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "agents").mkdir()
+    (source / "agents/reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Review\nmodel: inherit\ncolor: blue\n---\nReview the supplied text.\n",
+        encoding="utf-8",
+    )
+    # When generated, native model inheritance remains implicit without substituting an alias mapping.
+    if mapped:
+        run_cli(tmp_path, "config", "--target", target, "--model-map", "inherit=fixture-model", "--json")
+    output = tmp_path / "artifacts"
+    report = run_cli(
+        tmp_path, "migrate", "--source", str(source), "--target", target, "--output", str(output), "--json"
+    )
+    files = report["files"]
+    assert len(files) == 1
+    content = (output / files[0]).read_text()
+    metadata = tomllib.loads(content) if target == "codex" else yaml.safe_load(content.split("---", 2)[1])
+    assert "model" not in metadata
+    if target == "opencode-v2":
+        assert metadata["color"] == "#0000ff"
+    assert not any(item["status"] == "blocked" for item in report["components"])
+
+
 def test_user_nested_skill_resource_keeps_its_local_reference(tmp_path) -> None:
     from yi.adapters import preview
 
@@ -1228,6 +1275,14 @@ def test_user_invalid_generated_skill_name_blocks_only_that_skill(tmp_path) -> N
     assert not files
     assert report["components"][0]["status"] == "blocked"
     assert "name" in report["components"][0]["reason"].lower()
+
+
+def test_user_shared_json_contribution_requires_object_container() -> None:
+    from yi.shared_config import combine
+
+    # Given persisted contribution text that is valid JSON but not a native config object.
+    with pytest.raises(TypeError, match="object"):
+        combine("opencode-v2/home/.config/opencode/opencode.json", ["[]"])
 
 
 @pytest.mark.parametrize("description", [None, 7, "", "   "])
@@ -1835,6 +1890,42 @@ def test_user_invalid_utf8_blocks_only_the_affected_prompt_component(tmp_path, l
     assert "UTF-8" in blocked["reason"]
 
 
+@pytest.mark.parametrize("target", ["ampcode", "codex", "opencode-v2", "pi"])
+def test_user_namespaced_sibling_script_resources_execute_from_unrelated_cwd(tmp_path, target) -> None:
+    import subprocess
+
+    from yi.adapters import preview
+    from yi.artifacts import apply
+
+    # Given an extensionless entry script using a real sibling resource and a document link to that resource.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    for name in ("first", "second"):
+        skill = source / "skills" / name
+        (skill / "scripts").mkdir(parents=True)
+        body = "Run ../second/scripts/receipt.\n" if name == "first" else "Provide receipt.\n"
+        (skill / "SKILL.md").write_text(f"---\ndescription: Guide\n---\n{body}", encoding="utf-8")
+    entry = source / "skills/first/scripts/start"
+    entry.write_text('#!/bin/sh\nset -eu\n"$(dirname "$0")/../../second/scripts/receipt"\n', encoding="utf-8")
+    receipt = source / "skills/second/scripts/receipt"
+    receipt.write_text('#!/bin/sh\nprintf "SIBLING-RESOURCE-RECEIPT\\n"\n', encoding="utf-8")
+    entry.chmod(0o755)
+    receipt.chmod(0o755)
+    original = entry.read_bytes()
+    root = tmp_path / "output"
+    # When generated, relative resource links resolve inside the target layout without changing source files.
+    report, files = preview(source, target)
+    apply(root, report, files)
+    start = next(root / name for name in files if name.endswith("sample-first/scripts/start"))
+    result = subprocess.run([str(start)], cwd=tmp_path, capture_output=True, text=True, check=False)  # noqa: S603 - Task-owned fixed synthetic receipt scripts.
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "SIBLING-RESOURCE-RECEIPT\n"
+    assert entry.read_bytes() == original
+    with pytest.raises(ValueError, match="Missing skill dependencies"):
+        preview(source, target, ["sample:first"])
+
+
 @pytest.mark.parametrize("data", [b"\xff../second/note.txt", b"\x00../second/note.txt"])
 def test_user_sibling_relocation_preserves_binary_resources(tmp_path, data) -> None:
     from yi.adapters import preview
@@ -2172,12 +2263,272 @@ def test_user_hook_runtime_unreadable_subtree_is_not_silently_omitted(tmp_path) 
         locked.chmod(0o755)
 
 
+def test_user_opencode_hook_and_mcp_contributions_are_both_published(tmp_path) -> None:
+    # Given one plugin owning both a disabled MCP server and a supported hook.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / ".mcp.json").write_text('{"mcpServers":{"docs":{"command":"fixture-server"}}}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    (source / "hooks/hooks.json").write_text(
+        '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"printf receipt"}]}]}}', encoding="utf-8"
+    )
+    output = tmp_path / "artifacts"
+    # When generated through the CLI, neither contribution can overwrite its sibling.
+    run_cli(tmp_path, "migrate", "--source", str(source), "--target", "opencode-v2", "--output", str(output), "--json")
+    config = json.loads((output / "opencode-v2/home/.config/opencode/opencode.json").read_text())
+    assert config["mcp"]["servers"]["sample-docs"]["disabled"] is True
+    assert len(config["plugins"]) == 1
+    assert "sample" in config["plugins"][0]
+    manifest = json.loads((output / "manifests/opencode-v2-sample.json").read_text())
+    contribution = json.loads(manifest["configuration"]["opencode-v2/home/.config/opencode/opencode.json"])
+    assert contribution == config
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python3 "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/check.py"',
+        'ROOT="${CLAUDE_PLUGIN_ROOT:-}"; python3 "$ROOT/.claude/hooks/check.py"',
+    ],
+)
+def test_user_excluded_hook_resource_blocks_only_its_handler(tmp_path, command) -> None:
+    # Given a command whose existing script is deliberately excluded from relocation.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / ".claude/hooks").mkdir(parents=True)
+    (source / ".claude/hooks/check.py").write_text('print("excluded")\n', encoding="utf-8")
+    (source / "hooks").mkdir()
+    handlers = [
+        {"type": "command", "command": command},
+        {"type": "command", "command": "printf independent"},
+    ]
+    (source / "hooks/hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"hooks": handlers}]}}), encoding="utf-8"
+    )
+    output = tmp_path / "artifacts"
+    # When generated, keep the independent command but never register the unavailable script.
+    result = run_cli(tmp_path, "migrate", "--source", str(source), "--target", "pi", "--output", str(output), "--json")
+    config = json.loads((output / "pi/home/.local/share/yi/hooks/sample/config.json").read_text())
+    assert config["events"]["PreToolUse"][0]["hooks"] == handlers[1:]
+    blocked = [item for item in result["components"] if item["status"] == "blocked"]
+    assert len(blocked) == 1
+    assert "excluded" in blocked[0]["reason"].lower()
+    assert not any("/source/.claude/hooks/" in name for name in result["files"])
+
+
+@pytest.mark.parametrize("matcher", [17, ["Bash"], "(", "a" * 513, "(a+)+$", ".*.*", "a{10000}", r"(a)\1"])
+def test_user_unsupported_hook_matcher_blocks_only_its_group(tmp_path, matcher) -> None:
+    # Given one unsupported matcher beside an independently supported group.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    good = {"matcher": "^(Bash|Read)$", "hooks": [{"type": "command", "command": "printf independent"}]}
+    bad = {"matcher": matcher, "hooks": [{"type": "command", "command": "printf rejected"}]}
+    (source / "hooks/hooks.json").write_text(json.dumps({"hooks": {"PreToolUse": [bad, good]}}), encoding="utf-8")
+    output = tmp_path / "artifacts"
+    # When generated, report matcher incompatibility before any target handler can run.
+    result = run_cli(tmp_path, "migrate", "--source", str(source), "--target", "pi", "--output", str(output), "--json")
+    config = json.loads((output / "pi/home/.local/share/yi/hooks/sample/config.json").read_text())
+    assert config["events"]["PreToolUse"] == [good]
+    assert any(item["status"] == "blocked" and "matcher" in item["reason"].lower() for item in result["components"])
+
+
+@pytest.mark.parametrize("timeout", [3601, float("inf"), 0, True])
+def test_user_hook_timeout_outside_runtime_bound_blocks_only_handler(tmp_path, timeout) -> None:
+    # Given an invalid timeout beside an independently bounded command.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    good = {"type": "command", "command": "printf independent", "timeout": 3600}
+    bad = {"type": "command", "command": "printf rejected", "timeout": timeout}
+    (source / "hooks/hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"hooks": [bad, good]}]}}), encoding="utf-8"
+    )
+    output = tmp_path / "artifacts"
+    # When generated, reject the unusable timeout without discarding its sibling.
+    result = run_cli(tmp_path, "migrate", "--source", str(source), "--target", "pi", "--output", str(output), "--json")
+    config = json.loads((output / "pi/home/.local/share/yi/hooks/sample/config.json").read_text())
+    assert config["events"]["PreToolUse"][0]["hooks"] == [good]
+    assert any(item["status"] == "blocked" and "timeout" in item["reason"].lower() for item in result["components"])
+
+
+@pytest.mark.parametrize("event", ["SessionEnd", "Interrupt"])
+def test_user_codex_exit_deadline_is_explicit_and_incompatible_handlers_are_blocked(tmp_path, event) -> None:
+    # Given a short compatible exit handler beside implicit 60s and explicit over-cap handlers.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    (source / "hooks").mkdir()
+    good = {"type": "command", "command": "printf independent", "timeout": 2}
+    handlers = [
+        good,
+        {"type": "command", "command": "printf implicit"},
+        {"type": "command", "command": "printf long", "timeout": 4},
+    ]
+    (source / "hooks/hooks.json").write_text(json.dumps({"hooks": {event: [{"hooks": handlers}]}}), encoding="utf-8")
+    output = tmp_path / "artifacts"
+    # When generated, never pretend source budgets can extend the native teardown deadline.
+    result = run_cli(
+        tmp_path, "migrate", "--source", str(source), "--target", "codex", "--output", str(output), "--json"
+    )
+    native = json.loads((output / "codex/home/.codex/hooks.json").read_text())
+    assert native["hooks"][event][0]["hooks"][0]["timeout"] == 3
+    config = json.loads((output / "codex/home/.local/share/yi/hooks/sample/config.json").read_text())
+    assert config["events"][event][0]["hooks"] == [good]
+    blocked = [item for item in result["components"] if item["status"] == "blocked"]
+    assert len(blocked) == 2
+    assert all("3" in item["reason"] and "timeout" in item["reason"].lower() for item in blocked)
+    prepared = next(item for item in result["components"] if item["kind"] == "hooks" and item["status"] == "unverified")
+    assert "default 1" in prepared["reason"]
+    assert "cap 3" in prepared["reason"]
+
+
+@pytest.mark.parametrize("declaration", ["inline", "custom"])
+def test_user_marketplace_hook_runtime_does_not_publish_effective_mcp_credentials(tmp_path, declaration) -> None:
+    import subprocess
+    import sys
+
+    from tests.test_usage import ENTRY
+
+    # Given marketplace-only MCP declarations whose resolved credentials evade generic secret patterns.
+    root = tmp_path / "claude"
+    source = tmp_path / "cached"
+    (source / "hooks").mkdir(parents=True)
+    (source / "hooks/hooks.json").write_text(
+        '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"printf receipt"}]}]}}', encoding="utf-8"
+    )
+    servers = {"docs": {"command": "fixture-server", "headers": {"Authorization": "synthetic-private-header"}}}
+    value = servers
+    if declaration == "custom":
+        (source / "configs").mkdir()
+        (source / "configs/service.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        value = "configs/service.json"
+    market = tmp_path / "market"
+    (market / ".claude-plugin").mkdir(parents=True)
+    (market / ".claude-plugin/marketplace.json").write_text(
+        json.dumps({"plugins": [{"name": "sample", "source": "./sample", "strict": False, "mcpServers": value}]}),
+        encoding="utf-8",
+    )
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins/installed_plugins.json").write_text(
+        json.dumps({"plugins": {"sample@local": [{"installPath": str(source)}]}}), encoding="utf-8"
+    )
+    (root / "plugins/known_marketplaces.json").write_text(
+        json.dumps({"local": {"installLocation": str(market)}}), encoding="utf-8"
+    )
+    output = tmp_path / "artifacts"
+    # When generating hooks for Pi, credentials must not enter the relocated tree even with MCP blocked.
+    result = subprocess.run(  # noqa: S603 - Fixed helper and isolated marketplace-only declarations.
+        [
+            sys.executable,
+            str(ENTRY),
+            "migrate",
+            "--source",
+            str(source),
+            "--claude-dir",
+            str(root),
+            "--target",
+            "pi",
+            "--output",
+            str(output),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    report = json.loads(result.stdout)
+    assert "credential" in report["error"].lower()
+    assert "synthetic-private-header" not in result.stdout
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Document authoring syntax.\n",
+        "### CLAUDE_PLUGIN_ROOT Variable\n",
+        (
+            "Plugin commands have access to `${CLAUDE_PLUGIN_ROOT}`, an environment variable "
+            "that resolves to the plugin's absolute path.\n"
+        ),
+        "````markdown\n```\n!`authoring-example`\n${CLAUDE_PLUGIN_ROOT}/scripts/example.py\n```\n````\n",
+        '```json\n{"command":"python3 ${CLAUDE_PLUGIN_ROOT}/hooks/example.py"}\n```\n',
+        "```text\n${CLAUDE_PLUGIN_ROOT}/scripts/example.py\n```\n",
+        "```md\n${CLAUDE_PLUGIN_ROOT}/scripts/example.py\n```\n",
+        "```yaml\ncommand: python3 ${CLAUDE_PLUGIN_ROOT}/hooks/example.py\n```\n",
+        "Example command:\n```bash\npython3 ${CLAUDE_PLUGIN_ROOT}/scripts/future.py\n```\n",
+        '**Example script:**\n\n```python\nroot = "${CLAUDE_PLUGIN_ROOT}/scripts/future.py"\n```\n',
+        "### Example\n~~~bash\nprintf '%s' `${CLAUDE_PLUGIN_ROOT}/examples/`\n~~~\n",
+    ],
+)
+def test_user_skill_documentary_root_metadata_and_authoring_examples_remain_literal(tmp_path, body) -> None:
+    # Given a documentation skill describing source syntax, not requiring live source expansion.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/authoring/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: authoring\ndescription: Explain CLAUDE_PLUGIN_ROOT syntax\n"
+        "metadata:\n  source-variable: CLAUDE_PLUGIN_ROOT\n---\n" + body,
+        encoding="utf-8",
+    )
+    output = tmp_path / "artifacts"
+    # When generated, preserve literal authoring guidance instead of declaring a false runtime blocker.
+    report = run_cli(tmp_path, "migrate", "--source", str(source), "--target", "pi", "--output", str(output), "--json")
+    generated = output / "pi/home/.pi/agent/skills/sample-authoring/SKILL.md"
+    assert generated.exists()
+    assert generated.read_text().endswith(body)
+    assert "Explain CLAUDE_PLUGIN_ROOT syntax" in generated.read_text()
+    assert not any(item["status"] == "blocked" for item in report["components"])
+
+
 @pytest.fixture
 def teaching_plugin(tmp_path) -> Path:
     source = tmp_path / "source"
     (source / ".claude-plugin").mkdir(parents=True)
     (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
     return source
+
+
+@pytest.mark.parametrize("target", ["ampcode", "codex", "opencode-v2", "pi"])
+@pytest.mark.parametrize("manual", [False, True])
+def test_user_explicitly_invocable_skill_preserves_manual_policy(tmp_path, teaching_plugin, target, manual) -> None:
+    # Given an explicitly user-invocable skill with an independent automatic-invocation restriction.
+    path = teaching_plugin / "skills/check/SKILL.md"
+    path.parent.mkdir(parents=True)
+    policy = "disable-model-invocation: true\n" if manual else ""
+    path.write_text("---\ndescription: Guide\nuser-invocable: true\n" + policy + "---\nGuide.\n", encoding="utf-8")
+    output = tmp_path / "artifacts"
+    # When migrated through the public CLI, normalize the source-only key without weakening manual policy.
+    report = run_cli(
+        tmp_path, "migrate", "--source", str(teaching_plugin), "--target", target, "--output", str(output), "--json"
+    )
+    blocked = [item for item in report["components"] if item["status"] == "blocked"]
+    # Then Amp still blocks manual-only skills; other targets carry their native policy.
+    if manual and target == "ampcode":
+        assert "manual-invocation-policy-unavailable" in blocked[0]["reason"]
+        assert not report["files"]
+        return
+    assert not blocked
+    generated = next(output.glob(f"{target}/home/**/sample-check/SKILL.md"))
+    content = generated.read_text()
+    assert "user-invocable" not in content
+    assert content.endswith("Guide.\n")
+    if manual:
+        if target == "pi":
+            assert "disable-model-invocation: true" in content
+        elif target == "opencode-v2":
+            assert "opencode/autoinvoke: false" in content
+        else:
+            policy_file = generated.parent / "agents/openai.yaml"
+            assert "allow_implicit_invocation: false" in policy_file.read_text()
 
 
 @pytest.mark.parametrize(
@@ -2213,6 +2564,52 @@ def test_user_restricted_or_invalid_invocation_metadata_stays_blocked(tmp_path, 
     assert not report["files"]
     assert reason in report["components"][0]["reason"]
     assert "Adapt" in report["components"][0]["reason"]
+
+
+@pytest.mark.parametrize("target", ["ampcode", "codex", "opencode-v2", "pi"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "- Use ${CLAUDE_PLUGIN_ROOT} for portability\n",
+        "- Command and args (with ${CLAUDE_PLUGIN_ROOT})\n",
+        "- Verify ${CLAUDE_PLUGIN_ROOT} usage\n",
+        "- ${CLAUDE_PLUGIN_ROOT} for portability\n",
+        "### CLAUDE_PLUGIN_ROOT Variable\n",
+        (
+            "Plugin commands have access to `${CLAUDE_PLUGIN_ROOT}`, an environment variable "
+            "that resolves to the plugin's absolute path.\n"
+        ),
+        "Example command:\n```bash\npython3 ${CLAUDE_PLUGIN_ROOT}/scripts/future.py\n```\n",
+        '**Example script:**\n\n```python\nroot = "${CLAUDE_PLUGIN_ROOT}/scripts/future.py"\n```\n',
+        "### Example\n~~~bash\nprintf '%s' `${CLAUDE_PLUGIN_ROOT}/examples/`\n~~~\n",
+    ],
+)
+def test_user_command_teaching_survives_dependency_rerender(tmp_path, teaching_plugin, target, body) -> None:
+    # Given a teaching command requiring a local explicitly invocable skill, without those future resources.
+    skill = teaching_plugin / "skills/rules/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Rules\nuser-invocable: true\n---\nRequired.\n", encoding="utf-8")
+    command = teaching_plugin / "commands/teach.md"
+    command.parent.mkdir()
+    command.write_text("Load sample:rules skill\n" + body, encoding="utf-8")
+    output = tmp_path / "artifacts"
+    # When generated, both the initial validation and load-directive rerender must preserve the teaching bytes.
+    report = run_cli(
+        tmp_path, "migrate", "--source", str(teaching_plugin), "--target", target, "--output", str(output), "--json"
+    )
+    # Then future example paths neither trigger resource collection nor replace real dependency handling.
+    assert not any(item["status"] == "blocked" for item in report["components"])
+    generated = next(output.glob(f"{target}/home/**/sample-teach*"))
+    if generated.is_dir():
+        generated /= "SKILL.md"
+    content = generated.read_text()
+    if target == "ampcode":
+        content = json.loads(content.split("const content = ", 1)[1].split(";\n", 1)[0])
+    assert body in content
+    assert "Load sample:rules skill" not in content
+    assert "target HOME" in content
+    assert not any("/resources/" in name for name in report["files"])
+    assert "user-invocable" not in next(output.glob(f"{target}/home/**/sample-rules/SKILL.md")).read_text()
 
 
 @pytest.mark.parametrize(
@@ -2354,6 +2751,80 @@ def test_user_teaching_classification_cannot_hide_runtime_requirements(tmp_path,
     assert reason in report["components"][0]["reason"]
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_user_partial_hooks_skill_regeneration_preserves_native_hook_runtime(tmp_path, legacy) -> None:
+    # Given a prompt named hooks and a separately generated native hook capability.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
+    skill = source / "skills/hooks/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\ndescription: Guide\n---\nOriginal skill.\n", encoding="utf-8")
+    (source / "hooks").mkdir()
+    (source / "hooks/hooks.json").write_text(
+        '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"printf receipt"}]}]}}', encoding="utf-8"
+    )
+    output = tmp_path / "artifacts"
+    run_cli(tmp_path, "migrate", "--source", str(source), "--target", "opencode-v2", "--output", str(output), "--json")
+    runtime = output / "opencode-v2/home/.local/share/yi/hooks/sample/runner.mjs"
+    original = runtime.read_bytes()
+    config_path = output / "opencode-v2/home/.config/opencode/opencode.json"
+    registration = config_path.read_bytes()
+    if legacy:
+        manifest_path = output / "manifests/opencode-v2-sample.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["owners"] = {path: owner.replace(":capability:", ":") for path, owner in manifest["owners"].items()}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # When only the selected skill is regenerated, retain the independently owned runtime and registration.
+    skill.write_text("---\ndescription: Guide\n---\nUpdated skill.\n", encoding="utf-8")
+    if legacy:
+        import subprocess
+        import sys
+
+        from tests.test_usage import ENTRY
+
+        result = subprocess.run(  # noqa: S603 - Fixed helper and intentionally ambiguous legacy ownership.
+            [
+                sys.executable,
+                str(ENTRY),
+                "migrate",
+                "--source",
+                str(source),
+                "--target",
+                "opencode-v2",
+                "--item",
+                "sample:hooks",
+                "--output",
+                str(output),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "regenerate the whole plugin" in json.loads(result.stdout)["error"].lower()
+    else:
+        run_cli(
+            tmp_path,
+            "migrate",
+            "--source",
+            str(source),
+            "--target",
+            "opencode-v2",
+            "--item",
+            "sample:hooks",
+            "--output",
+            str(output),
+            "--json",
+        )
+    assert runtime.is_file()
+    assert runtime.read_bytes() == original
+    assert config_path.read_bytes() == registration
+    expected = "Original skill.\n" if legacy else "Updated skill.\n"
+    assert (output / "opencode-v2/home/.config/opencode/skills/sample-hooks/SKILL.md").read_text().endswith(expected)
+
+
 def test_user_mcp_declaration_parent_symlink_is_rejected_before_reading(tmp_path) -> None:
     import subprocess
     import sys
@@ -2380,27 +2851,3 @@ def test_user_mcp_declaration_parent_symlink_is_rejected_before_reading(tmp_path
     )
     assert result.returncode != 0
     assert "symlink" in json.loads(result.stdout)["error"].lower()
-
-
-def test_user_opencode_agent_inherits_model_without_literal_alias(tmp_path) -> None:
-    import yaml
-
-    from yi.adapters import preview
-
-    # Given an agent that explicitly inherits the active model and has descriptive color metadata.
-    source = tmp_path / "source"
-    (source / ".claude-plugin").mkdir(parents=True)
-    (source / ".claude-plugin/plugin.json").write_text('{"name":"sample"}', encoding="utf-8")
-    (source / "agents").mkdir()
-    (source / "agents/reviewer.md").write_text(
-        "---\nname: reviewer\ndescription: Review\nmodel: inherit\ncolor: blue\n---\nReview the supplied text.\n",
-        encoding="utf-8",
-    )
-    # When converted, native model inheritance remains implicit and no invalid model alias is emitted.
-    report, files = preview(source, "opencode-v2")
-    assert files
-    content = next(iter(files.values())).decode()
-    metadata = yaml.safe_load(content.split("---", 2)[1])
-    assert "model" not in metadata
-    assert metadata["color"] == "#0000ff"
-    assert not any(item["status"] == "blocked" for item in report["components"])
