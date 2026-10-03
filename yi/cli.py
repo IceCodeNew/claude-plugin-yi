@@ -59,6 +59,13 @@ def parse_args() -> argparse.Namespace:
         "--allow-auth", action="store_true", help="Allow Amp to use existing authentication for discovery."
     )
     checker.add_argument("--executable", help="Use a specific native CLI executable.")
+    installer = commands.add_parser("install", help="Preview or explicitly install generated artifacts.")
+    installer.add_argument("--output", type=Path, required=True)
+    installer.add_argument("--target", choices=tuple(SKILL_ROOTS), required=True)
+    installer.add_argument("--destination", type=Path, required=True)
+    installer.add_argument("--apply", action="store_true")
+    installer.add_argument("--accept-unverified", action="store_true")
+    installer.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
@@ -83,7 +90,14 @@ def dispatch(args: argparse.Namespace) -> int:
         return collect(args)
     if args.command == "migrate":
         return run_migration(args)
-    if args.command == "check":
+    if args.command == "install":
+        from yi import install  # noqa: PLC0415 - Load optional capability only when selected.
+
+        result = install.install(
+            args.output, args.target, args.destination, apply=args.apply, accept_unverified=args.accept_unverified
+        )
+        sys.stdout.write(json.dumps(result) + "\n")
+    elif args.command == "check":
         run_check(args)
     elif args.command == "config":
         sys.stdout.write(
