@@ -31,23 +31,25 @@ def parse_args() -> argparse.Namespace:
     source_choice.add_argument("--source", type=Path)
     source_choice.add_argument("--claude-dir", type=Path)
     sources.add_argument("--json", action="store_true")
-    migration = commands.add_parser(
-        "migrate", help="Preview deterministic migration conversions; --dry-run is required."
-    )
+    migration = commands.add_parser("migrate", help="Prepare isolated migration artifacts.")
     migration.add_argument("--source", type=Path, action="append", required=True)
     migration.add_argument("--target", choices=tuple(SKILL_ROOTS), action="append", required=True)
     migration.add_argument("--item", action="append", help="Select a complete component ID; repeat for multiple items.")
     migration.add_argument("--claude-dir", type=Path, help="Resolve installed marketplace-owned manifests.")
     migration.add_argument("--output", type=Path)
-    migration.add_argument(
-        "--dry-run", action="store_true", help="Required here; generation arrives in the next layer."
-    )
+    migration.add_argument("--dry-run", action="store_true")
     migration.add_argument("--json", action="store_true")
     settings = commands.add_parser("config", help="Read or set the private artifact-root configuration.")
     settings.add_argument("--output", type=Path)
     settings.add_argument("--target", choices=tuple(SKILL_ROOTS))
     settings.add_argument("--model-map", action="append", help="Map a source model alias to an explicit target model.")
     settings.add_argument("--json", action="store_true")
+    checker = commands.add_parser("check", help="Inspect generated artifact integrity without execution.")
+    checker.add_argument("--output", type=Path, required=True)
+    checker.add_argument("--json", action="store_true")
+    checker.add_argument(
+        "--accept-changes", action="store_true", help="Accept explicitly reviewed edits to tracked resources."
+    )
     return parser.parse_args()
 
 
@@ -72,7 +74,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return collect(args)
     if args.command == "migrate":
         return run_migration(args)
-    if args.command == "config":
+    if args.command == "check":
+        run_check(args)
+    elif args.command == "config":
         sys.stdout.write(
             json.dumps(config.configure(args.data_dir, args.output, target=args.target, model_maps=args.model_map))
             + "\n"
@@ -101,12 +105,10 @@ def dispatch(args: argparse.Namespace) -> int:
 
 def run_migration(args: argparse.Namespace) -> int:
     """Prepare all selected units before changing artifact files."""
-    from yi import adapters, catalog  # noqa: PLC0415 - Isolate migration startup from hooks.
+    from yi import adapters, artifacts, catalog  # noqa: PLC0415 - Isolate migration startup from hooks.
 
-    if not args.dry_run:
-        msg = "Artifact generation is not available in this layer; use --dry-run."
-        raise ValueError(msg)
     settings = config.configure(args.data_dir)
+    output = args.output or Path(settings["output_root"])
     selections = selections_by_source(args.source, args.item, args.claude_dir)
     plans = [
         adapters.preview(
@@ -119,9 +121,20 @@ def run_migration(args: argparse.Namespace) -> int:
         for source, selected in selections
         for target in dict.fromkeys(args.target)
     ]
+    failed = False
+    for report, files in plans:
+        if failed:
+            report["status"] = "not-attempted"
+        elif not args.dry_run:
+            try:
+                report["changed"] = artifacts.apply(output, report, files)
+            except (ValueError, TypeError, KeyError, OSError, sqlite3.Error) as error:
+                report["status"] = "failed"
+                report["error"] = str(error)
+                failed = True
     result = plans[0][0] if len(plans) == 1 else {"plans": [report for report, _ in plans]}
     sys.stdout.write(json.dumps(result) + "\n")
-    return 0
+    return int(failed)
 
 
 def collect(args: argparse.Namespace) -> int:
@@ -167,3 +180,13 @@ def selections_by_source(
         for source, names in inventories
         if names.intersection(selected)
     ]
+
+
+def run_check(args: argparse.Namespace) -> None:
+    """Separate integrity reporting from optional native discovery."""
+    from yi import checks  # noqa: PLC0415 - Integrity checks are opt-in.
+
+    if args.accept_changes:
+        checks.accept_changes(args.output)
+    report = checks.inspect(args.output)
+    sys.stdout.write(json.dumps(report) + "\n")
