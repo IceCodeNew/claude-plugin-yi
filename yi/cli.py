@@ -7,7 +7,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from yi import usage
+from yi import config, usage
+from yi.targets import SKILL_ROOTS
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +31,23 @@ def parse_args() -> argparse.Namespace:
     source_choice.add_argument("--source", type=Path)
     source_choice.add_argument("--claude-dir", type=Path)
     sources.add_argument("--json", action="store_true")
+    migration = commands.add_parser(
+        "migrate", help="Preview deterministic migration conversions; --dry-run is required."
+    )
+    migration.add_argument("--source", type=Path, action="append", required=True)
+    migration.add_argument("--target", choices=tuple(SKILL_ROOTS), action="append", required=True)
+    migration.add_argument("--item", action="append", help="Select a complete component ID; repeat for multiple items.")
+    migration.add_argument("--claude-dir", type=Path, help="Resolve installed marketplace-owned manifests.")
+    migration.add_argument("--output", type=Path)
+    migration.add_argument(
+        "--dry-run", action="store_true", help="Required here; generation arrives in the next layer."
+    )
+    migration.add_argument("--json", action="store_true")
+    settings = commands.add_parser("config", help="Read or set the private artifact-root configuration.")
+    settings.add_argument("--output", type=Path)
+    settings.add_argument("--target", choices=tuple(SKILL_ROOTS))
+    settings.add_argument("--model-map", action="append", help="Map a source model alias to an explicit target model.")
+    settings.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
@@ -52,7 +70,14 @@ def dispatch(args: argparse.Namespace) -> int:
     """Run one operation after argument parsing."""
     if args.command == "record":
         return collect(args)
-    if args.command == "catalog":
+    if args.command == "migrate":
+        return run_migration(args)
+    if args.command == "config":
+        sys.stdout.write(
+            json.dumps(config.configure(args.data_dir, args.output, target=args.target, model_maps=args.model_map))
+            + "\n"
+        )
+    elif args.command == "catalog":
         from yi import catalog  # noqa: PLC0415 - Collection must not load source discovery.
 
         items = catalog.discover(args.source) if args.source else catalog.installed(args.claude_dir)
@@ -74,6 +99,31 @@ def dispatch(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_migration(args: argparse.Namespace) -> int:
+    """Prepare all selected units before changing artifact files."""
+    from yi import adapters, catalog  # noqa: PLC0415 - Isolate migration startup from hooks.
+
+    if not args.dry_run:
+        msg = "Artifact generation is not available in this layer; use --dry-run."
+        raise ValueError(msg)
+    settings = config.configure(args.data_dir)
+    selections = selections_by_source(args.source, args.item, args.claude_dir)
+    plans = [
+        adapters.preview(
+            source,
+            target,
+            selected,
+            manifest=catalog.registered_manifest(source, args.claude_dir),
+            model_mapping=settings.get("model_mappings", {}).get(target, {}),
+        )
+        for source, selected in selections
+        for target in dict.fromkeys(args.target)
+    ]
+    result = plans[0][0] if len(plans) == 1 else {"plans": [report for report, _ in plans]}
+    sys.stdout.write(json.dumps(result) + "\n")
+    return 0
+
+
 def collect(args: argparse.Namespace) -> int:
     """Keep collection failures nonblocking in hook mode."""
     try:
@@ -84,3 +134,36 @@ def collect(args: argparse.Namespace) -> int:
     if not args.hook:
         sys.stdout.write(json.dumps({"recorded": recorded}) + "\n")
     return 0
+
+
+def selections_by_source(
+    sources: list[Path], selected: list[str] | None, claude_root: Path | None = None
+) -> list[tuple[Path, list[str] | None]]:
+    """Validate global selection once, then partition it by source."""
+    from yi import catalog  # noqa: PLC0415 - Source discovery belongs to migration.
+
+    sources = list(dict.fromkeys(catalog.checked_source(source) for source in sources))
+    plugin_names = [catalog.registered_manifest(source, claude_root)["name"] for source in sources]
+    if len(plugin_names) != len(set(plugin_names)):
+        msg = "Ambiguous plugin installations; select one source for each plugin name."
+        raise ValueError(msg)
+    if not selected:
+        return [(source, None) for source in sources]
+    inventories = [
+        (source, {item["name"] for item in catalog.discover(source, catalog.registered_manifest(source, claude_root))})
+        for source in sources
+    ]
+    for name in selected:
+        if sum(name in names for _, names in inventories) > 1:
+            msg = f"Ambiguous selected component: {name}. Choose one source explicitly."
+            raise ValueError(msg)
+    available = set().union(*(names for _, names in inventories))
+    missing = set(selected) - available
+    if missing:
+        msg = "Unknown selected components: " + ", ".join(sorted(missing))
+        raise ValueError(msg)
+    return [
+        (source, [name for name in selected if name in names])
+        for source, names in inventories
+        if names.intersection(selected)
+    ]
