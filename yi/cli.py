@@ -53,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     checker.add_argument(
         "--accept-changes", action="store_true", help="Accept explicitly reviewed edits to tracked resources."
     )
+    checker.add_argument("--native", action="store_true", help="Run an explicit isolated native discovery check.")
+    checker.add_argument("--target", choices=tuple(SKILL_ROOTS))
+    checker.add_argument(
+        "--allow-auth", action="store_true", help="Allow Amp to use existing authentication for discovery."
+    )
+    checker.add_argument("--executable", help="Use a specific native CLI executable.")
     return parser.parse_args()
 
 
@@ -194,7 +200,14 @@ def run_check(args: argparse.Namespace) -> None:
     """Separate integrity reporting from optional native discovery."""
     from yi import checks  # noqa: PLC0415 - Integrity checks are opt-in.
 
+    if args.native and not args.target:
+        msg = "Native checking requires --target."
+        raise ValueError(msg)
     if args.accept_changes:
         checks.accept_changes(args.output)
     report = checks.inspect(args.output)
+    if args.native:
+        from yi import native  # noqa: PLC0415 - Native process/network dependencies are explicit.
+
+        report["native"] = native.check(args.output, args.target, args.executable, allow_auth=args.allow_auth)
     sys.stdout.write(json.dumps(report) + "\n")
