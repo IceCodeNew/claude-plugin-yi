@@ -219,6 +219,42 @@ def test_user_partial_regeneration_removes_stale_selected_resources(tmp_path) ->
     assert set(manifest["files"]) == set(manifest["hashes"])
 
 
+def test_user_generated_skill_survives_check_and_install(tmp_path) -> None:
+    from yi.adapters import preview
+    from yi.artifacts import apply, git
+    from yi.checks import inspect
+    from yi.install import install
+
+    # Given a portable skill with an executable resource and an owned artifact repository.
+    source = tmp_path / "source"
+    (source / ".claude-plugin").mkdir(parents=True)
+    (source / ".claude-plugin/plugin.json").write_text('{"name":"demo"}', encoding="utf-8")
+    skill = source / "skills/check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: check\ndescription: Check\n---\nRun ./run.sh.\n", encoding="utf-8")
+    (skill / "run.sh").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (skill / "run.sh").chmod(0o755)
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    git(root, "init", "--initial-branch=main")
+    git(root, "config", "user.name", "Fixture")
+    git(root, "config", "user.email", "fixture@example.invalid")
+    (root / ".yi-artifacts.json").write_text('{"owner":"yi","schema":1}', encoding="utf-8")
+    git(root, "add", ".yi-artifacts.json")
+    git(root, "commit", "-m", "fixture: initialize")
+    # When real generation feeds integrity checking and installation.
+    report, files = preview(source, "pi", ["demo:check"])
+    apply(root, report, files)
+    assert inspect(root)["intact"] is True
+    home = tmp_path / "home"
+    install(root, "pi", home, apply=True, accept_unverified=True)
+    # Then namespaced content and executable mode survive the complete pipeline.
+    installed = home / ".pi/agent/skills/demo-check"
+    assert b"name: demo-check" in (installed / "SKILL.md").read_bytes()
+    assert (installed / "run.sh").read_bytes() == b"#!/bin/sh\nexit 0\n"
+    assert (installed / "run.sh").stat().st_mode & 0o111
+
+
 def test_user_combines_opencode_mcp_from_two_plugins(tmp_path) -> None:
     from yi.adapters import preview
     from yi.artifacts import apply, git
@@ -555,7 +591,7 @@ def test_user_output_plan_parent_collision_is_rejected_before_writes(tmp_path) -
     assert not (root / "manifests/codex-demo.json").exists()
 
 
-@pytest.mark.parametrize("operation", ["migrate", "check"])
+@pytest.mark.parametrize("operation", ["migrate", "check", "install"])
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -600,7 +636,7 @@ def test_user_invalid_nested_manifest_ownership_returns_json_failure(tmp_path, o
     assert (root / "pi/home/a").read_bytes() == b"a"
 
 
-@pytest.mark.parametrize("operation", ["check"])
+@pytest.mark.parametrize("operation", ["check", "install"])
 def test_user_manifest_fifo_is_rejected_before_read(tmp_path, operation) -> None:
     # Given a persisted manifest path that is a FIFO.
     root = tmp_path / "output"

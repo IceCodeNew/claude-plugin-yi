@@ -1,0 +1,251 @@
+import hashlib
+import json
+
+from tests.test_usage import run_cli
+
+
+def test_user_previews_installation_before_explicit_apply(tmp_path) -> None:
+    # Given an intact unverified artifact and an empty target HOME.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    resource = root / "pi/home/.pi/agent/prompts/check.md"
+    resource.parent.mkdir(parents=True)
+    resource.write_bytes(b"Check text.\n")
+    relative = resource.relative_to(root).as_posix()
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "plugin": "demo",
+                "target": "pi",
+                "components": [{"status": "unverified"}],
+                "hashes": {relative: hashlib.sha256(resource.read_bytes()).hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    destination = tmp_path / "destination"
+    args = ("install", "--output", str(root), "--target", "pi", "--destination", str(destination), "--json")
+    # When previewed, no destination files are created.
+    preview = run_cli(tmp_path, *args)
+    assert preview["applied"] is False
+    assert not destination.exists()
+    # When explicitly accepted as unverified, then only the owned prompt is copied.
+    result = run_cli(tmp_path, *args, "--apply", "--accept-unverified")
+    assert result["applied"] is True
+    assert (destination / ".pi/agent/prompts/check.md").read_bytes() == b"Check text.\n"
+
+
+def test_user_cannot_claim_installation_with_no_artifacts(tmp_path) -> None:
+    import pytest
+
+    from yi.install import install
+
+    # Given an empty artifact directory, when applying, then no false success is returned.
+    with pytest.raises(ValueError, match=r"No.*artifacts"):
+        install(tmp_path / "empty", "pi", tmp_path / "home", apply=True, accept_unverified=True)
+
+
+def test_user_installs_scripts_with_executable_mode(tmp_path) -> None:
+    from yi.install import install
+
+    # Given an intact executable resource in a migration manifest.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    script = root / "pi/home/run.sh"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"#!/bin/sh\nexit 0\n")
+    script.chmod(0o755)
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "executables": ["pi/home/run.sh"],
+                "hashes": {"pi/home/run.sh": hashlib.sha256(script.read_bytes()).hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # When installed, then the executable permission is present on the destination.
+    home = tmp_path / "home"
+    install(root, "pi", home, apply=True, accept_unverified=False)
+    assert (home / "run.sh").stat().st_mode & 0o111
+
+
+def test_user_preserves_private_mode_on_identical_existing_file(tmp_path) -> None:
+    from yi.install import install
+
+    # Given an intact artifact and an identical private destination file.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    (root / "pi/home/data.txt").write_bytes(b"same")
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "hashes": {"pi/home/data.txt": hashlib.sha256(b"same").hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    existing = home / "data.txt"
+    existing.write_bytes(b"same")
+    existing.chmod(0o600)
+    # When installation runs, then an unchanged existing file retains its privacy permissions.
+    install(root, "pi", home, apply=True, accept_unverified=False)
+    assert existing.stat().st_mode & 0o777 == 0o600
+
+
+def test_user_rejects_installation_through_same_root_symlink(tmp_path) -> None:
+    import pytest
+
+    from yi.install import install
+
+    # Given a destination symlink to another existing file in the same HOME.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    (root / "pi/home/data.txt").write_bytes(b"same")
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "hashes": {"pi/home/data.txt": hashlib.sha256(b"same").hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    referent = home / "private.txt"
+    referent.write_bytes(b"same")
+    referent.chmod(0o600)
+    (home / "data.txt").symlink_to(referent)
+    # When installation is requested, then links are rejected before any write or chmod.
+    with pytest.raises(ValueError, match="symlink"):
+        install(root, "pi", home, apply=True, accept_unverified=False)
+    assert referent.stat().st_mode & 0o777 == 0o600
+
+
+def test_user_gets_mode_conflict_instead_of_silent_broken_executable(tmp_path) -> None:
+    import pytest
+
+    from yi.install import install
+
+    # Given an executable artifact and an identical destination without executable permission.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    content = b"#!/bin/sh\nexit 0\n"
+    (root / "pi/home/run.sh").write_bytes(content)
+    (root / "pi/home/run.sh").chmod(0o755)
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "executables": ["pi/home/run.sh"],
+                "hashes": {"pi/home/run.sh": hashlib.sha256(content).hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "run.sh").write_bytes(content)
+    (home / "run.sh").chmod(0o600)
+    # When installed, then the mode conflict is explicit and user permissions stay unchanged.
+    with pytest.raises(ValueError, match="executable"):
+        install(root, "pi", home, apply=True, accept_unverified=False)
+    assert (home / "run.sh").stat().st_mode & 0o777 == 0o600
+
+
+def test_user_rejects_manifest_path_escape_before_installation(tmp_path) -> None:
+    import pytest
+
+    from yi.install import install
+
+    # Given a manifest that tries to install outside the target HOME.
+    root = tmp_path / "output"
+    (root / "manifests").mkdir(parents=True)
+    (root / "pi/home").mkdir(parents=True)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"private fixture")
+    (root / "manifests/pi-demo.json").write_text(
+        json.dumps(
+            {
+                "components": [],
+                "hashes": {"pi/home/../outside.txt": hashlib.sha256(b"private fixture").hexdigest()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "pi/outside.txt").write_bytes(b"private fixture")
+    # When installation is requested, then the shared path guard rejects the escape.
+    with pytest.raises(ValueError, match="escapes"):
+        install(root, "pi", destination, apply=True, accept_unverified=True)
+    assert outside.read_bytes() == b"private fixture"
+
+
+def test_user_install_rejects_unaccepted_artifact_execution_mode(tmp_path) -> None:
+    import pytest
+
+    from yi.artifacts import apply
+    from yi.install import install
+
+    # Given a generated executable whose source artifact execution bits were removed.
+    root = tmp_path / "output"
+    path = "pi/home/run.sh"
+    apply(
+        root,
+        {"plugin": "demo", "target": "pi", "components": [], "owners": {path: "demo:run"}, "executables": [path]},
+        {path: b"exit 0\n"},
+    )
+    (root / path).chmod(0o600)
+    # When installing, refuse stale mode metadata rather than restoring permission from the manifest.
+    with pytest.raises(ValueError, match="changed"):
+        install(root, "pi", tmp_path / "destination", apply=True, accept_unverified=True)
+    assert not (tmp_path / "destination").exists()
+
+
+def test_user_real_install_write_failure_removes_only_new_destinations(tmp_path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from yi.artifacts import apply
+    from yi.install import install
+
+    # Given an intact artifact set with one identical existing destination and a late oversized new file.
+    root = tmp_path / "artifacts"
+    resources = {"pi/home/a-existing.txt": b"keep", "pi/home/b-new.txt": b"new", "pi/home/c-large.txt": b"x" * 8192}
+    apply(root, {"plugin": "sample", "target": "pi", "components": []}, resources)
+    destination = tmp_path / "home"
+    destination.mkdir()
+    existing = destination / "a-existing.txt"
+    existing.write_bytes(b"keep")
+    existing.chmod(0o600)
+    script = (
+        "import resource,signal,sys; from pathlib import Path; from yi.install import install; "
+        "signal.signal(signal.SIGXFSZ,signal.SIG_IGN); resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024)); "
+        "install(Path(sys.argv[1]),'pi',Path(sys.argv[2]),apply=True,accept_unverified=True)"
+    )
+    # When a genuine kernel write fails, remove incomplete new files but preserve pre-existing bytes and permissions.
+    result = subprocess.run(  # noqa: S603 - Child-only kernel limit, fixed entrypoint, synthetic local artifact paths.
+        [sys.executable, "-c", script, str(root), str(destination)],
+        env={key: value for key, value in os.environ.items() if key != "COVERAGE_PROCESS_CONFIG"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "File too large" in result.stderr
+    assert existing.read_bytes() == b"keep"
+    assert existing.stat().st_mode & 0o777 == 0o600
+    assert not (destination / "b-new.txt").exists()
+    assert not (destination / "c-large.txt").exists()
+    # Then an unrestricted retry installs all owned files normally.
+    assert install(root, "pi", destination, apply=True, accept_unverified=True)["applied"]
