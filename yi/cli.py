@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     importer = commands.add_parser("history", help="Import explicitly selected local session files.")
     importer.add_argument("--from", dest="source", type=Path, required=True)
     importer.add_argument("--json", action="store_true")
+    sources = commands.add_parser("catalog", help="Inspect local source components without execution.")
+    source_choice = sources.add_mutually_exclusive_group(required=True)
+    source_choice.add_argument("--source", type=Path)
+    source_choice.add_argument("--claude-dir", type=Path)
+    sources.add_argument("--json", action="store_true")
     return parser.parse_args()
 
 
@@ -47,7 +52,15 @@ def dispatch(args: argparse.Namespace) -> int:
     """Run one operation after argument parsing."""
     if args.command == "record":
         return collect(args)
-    if args.command == "history":
+    if args.command == "catalog":
+        from yi import catalog  # noqa: PLC0415 - Collection must not load source discovery.
+
+        items = catalog.discover(args.source) if args.source else catalog.installed(args.claude_dir)
+        counts = {item["name"]: item["count"] for item in usage.ranked(args.data_dir, "component")}
+        plugins = {item["name"]: item["count"] for item in usage.ranked(args.data_dir, "plugin")}
+        ranked_items = catalog.rank(items, counts, plugins)
+        sys.stdout.write(json.dumps({"items": ranked_items}) + "\n")
+    elif args.command == "history":
         from yi import history  # noqa: PLC0415 - Collection does not need transcript import.
 
         sys.stdout.write(json.dumps(history.import_history(args.data_dir, args.source)) + "\n")
